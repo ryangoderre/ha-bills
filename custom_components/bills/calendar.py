@@ -15,8 +15,12 @@ from .coordinator import BillsCoordinator
 from .entity import BillsEntity
 
 
-def _event(bill: dict[str, Any], d: date) -> CalendarEvent:
+def _event(bill: dict[str, Any], d: date,
+           categories: dict[str, dict[str, Any]]) -> CalendarEvent:
     parts = []
+    cat = categories.get(bill.get("category_id") or "")
+    if cat:
+        parts.append(f"Category: {cat['name']}")
     if bill["amount"] is not None:
         parts.append(f"Amount: {bill['amount']}")
     if bill["autopay"]:
@@ -28,6 +32,10 @@ def _event(bill: dict[str, Any], d: date) -> CalendarEvent:
         end=d + timedelta(days=1),  # all-day events end the next day
         summary=bill["name"],
         description="\n".join(parts) or None,
+        # A unique id per bill and date. Without it, apps that key events by
+        # uid (e.g. the iOS/macOS calendar widget) draw two bills on the
+        # same day as the first one twice.
+        uid=f"{bill['id']}_{d.isoformat()}",
     )
 
 
@@ -43,7 +51,7 @@ class BillsCalendar(BillsEntity, CalendarEntity):
         for b in self.coordinator.store.list_bills():
             due = date.fromisoformat(b["next_due"])
             if due >= today:
-                return _event(b, due)
+                return _event(b, due, self.coordinator.store.categories)
         return None
 
     async def async_get_events(
@@ -60,7 +68,7 @@ class BillsCalendar(BillsEntity, CalendarEntity):
                 date.fromisoformat(b["anchor_date"]),
                 b["frequency"], b["interval"], first, last, retire_on,
             ):
-                events.append(_event(b, d))
+                events.append(_event(b, d, self.coordinator.store.categories))
         events.sort(key=lambda e: e.start)
         return events
 

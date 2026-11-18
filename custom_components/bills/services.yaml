@@ -37,6 +37,9 @@ add_bill:
     tags:
       selector:
         text: {multiple: true}
+    category:
+      description: Category name or id.
+      selector: {text: }
 
 update_bill:
   name: Update bill
@@ -76,6 +79,9 @@ update_bill:
     tags:
       selector:
         text: {multiple: true}
+    category:
+      description: Category name or id; null to make it uncategorized.
+      selector: {text: }
 
 retire_bill:
   name: Retire bill
@@ -137,4 +143,82 @@ list_payments:
 
 send_reminders:
   name: Send reminders
-  description: Fire a bills_reminder event for every bill that is overdue, due today or inside its reminder window. Runs automatically daily at 9:00.
+  description: >-
+    Fire a bills_reminder event for every bill that is overdue, due today or
+    inside its reminder window. Runs automatically daily at 9:00, or on startup
+    if HA was down at 9:00. Calling it by hand always sends and doesn't affect
+    the daily run.
+
+backup:
+  name: Back up bills
+  description: >-
+    Save a copy of all bills and payments to /config/bills_backups/ now.
+    Daily copies are also made automatically (the last 14 are kept).
+
+list_backups:
+  name: List backups
+  description: List the backup files in /config/bills_backups/, newest first.
+
+restore_backup:
+  name: Restore backup
+  description: >-
+    Replace all bills and payments with a backup file from
+    /config/bills_backups/. A safety copy of the current data is saved first.
+  fields:
+    file:
+      required: true
+      example: bills-2026-11-18.json
+      selector: {text: }
+
+add_category:
+  name: Add category
+  description: Add a bill category with an icon.
+  fields:
+    name:
+      required: true
+      example: Utilities
+      selector: {text: }
+    icon:
+      default: mdi:tag
+      selector: {icon: }
+
+update_category:
+  name: Update category
+  description: Rename a category or change its icon.
+  fields:
+    category:
+      required: true
+      selector: {text: }
+    name:
+      selector: {text: }
+    icon:
+      selector: {icon: }
+
+delete_category:
+  name: Delete category
+  description: Delete a category. Its bills become uncategorized.
+  fields:
+    category:
+      required: true
+      selector: {text: }
+
+list_categories:
+  name: List categories
+  description: Return all categories with how many active bills use each.
+
+cost_summary:
+  name: Cost summary
+  description: >-
+    Paid, upcoming and total for bills due this month, this year (and each of
+    its months) and every previous year with data, by category. Counted by
+    due date.
+
+bill_history:
+  name: Bill history
+  description: >-
+    One bill's payments (newest due date first) with stats: average, lowest,
+    highest, the last payment's change, the recent trend and year over year.
+  fields:
+    bill:
+      required: true
+      selector: {text: }

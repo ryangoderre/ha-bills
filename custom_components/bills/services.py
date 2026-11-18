@@ -1,19 +1,26 @@
 """Service registration for the Bills integration."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
+from .backup import stamped_name as backup_name
 from .const import DOMAIN, EVENT_PAID
 from .schedule import FREQUENCIES, suggest_restore_due
+from .summary import bill_history, cost_breakdown, history_years, year_breakdown
 from .reminders import fire_reminders
 from .store import BillStore
 
 SERVICES = ("add_bill", "update_bill", "retire_bill", "restore_bill", "mark_paid",
-            "list_bills", "list_payments", "send_reminders")
+            "list_bills", "list_payments", "send_reminders",
+            "backup", "list_backups", "restore_backup",
+            "add_category", "update_category", "delete_category",
+            "list_categories", "cost_summary", "bill_history")
 
 _NONNEG_INT = vol.All(vol.Coerce(int), vol.Range(min=0))
 _INTERVAL = vol.All(vol.Coerce(int), vol.Range(min=1))
@@ -38,6 +45,7 @@ ADD_SCHEMA = vol.Schema({
     vol.Optional("biller_url"): cv.string,
     vol.Optional("notes"): cv.string,
     vol.Optional("tags", default=list): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional("category"): cv.string,
 })
 
 UPDATE_SCHEMA = vol.Schema({
@@ -53,6 +61,7 @@ UPDATE_SCHEMA = vol.Schema({
     vol.Optional("biller_url"): _clearable(cv.string),
     vol.Optional("notes"): _clearable(cv.string),
     vol.Optional("tags"): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional("category"): _clearable(cv.string),
 })
 
 BILL_SCHEMA = vol.Schema({vol.Required("bill"): cv.string})
@@ -76,6 +85,23 @@ LIST_BILLS_SCHEMA = vol.Schema({
 })
 
 LIST_PAYMENTS_SCHEMA = vol.Schema({vol.Optional("bill"): cv.string})
+
+RESTORE_BACKUP_SCHEMA = vol.Schema({vol.Required("file"): cv.string})
+
+DEFAULT_CATEGORY_ICON = "mdi:tag"
+
+ADD_CATEGORY_SCHEMA = vol.Schema({
+    vol.Required("name"): _NAME,
+    vol.Optional("icon", default=DEFAULT_CATEGORY_ICON): cv.icon,
+})
+
+UPDATE_CATEGORY_SCHEMA = vol.Schema({
+    vol.Required("category"): cv.string,
+    vol.Optional("name"): _NAME,
+    vol.Optional("icon"): cv.icon,
+})
+
+CATEGORY_SCHEMA = vol.Schema({vol.Required("category"): cv.string})
 
 
 def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
@@ -132,6 +158,58 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         sent = fire_reminders(hass, store)
         return {"sent": len(sent), "reminders": sent}
 
+    async def backup_now(call: ServiceCall):
+        name = backup_name(dt_util.now(), "manual")
+        path = await store.async_write_backup(name)
+        return {"file": name, "path": str(path)}
+
+    async def list_backups(call: ServiceCall):
+        return {"folder": str(store.backup_dir),
+                "backups": await store.async_list_backups()}
+
+    async def restore_backup(call: ServiceCall):
+        return await store.async_restore_backup(call.data["file"])
+
+    async def add_category(call: ServiceCall):
+        cat = await store.async_add_category(call.data["name"], call.data["icon"])
+        return {"category": cat}
+
+    async def update_category(call: ServiceCall):
+        changes = dict(call.data)
+        cat = await store.async_update_category(changes.pop("category"), changes)
+        return {"category": cat}
+
+    async def delete_category(call: ServiceCall):
+        cat, moved = await store.async_delete_category(call.data["category"])
+        return {"deleted": cat["name"], "bills_uncategorized": moved}
+
+    async def list_categories(call: ServiceCall):
+        return {"categories": store.list_categories()}
+
+    async def cost_summary(call: ServiceCall):
+        """This month, this year (with its months) and previous years, by category."""
+        today = dt_util.now().date()
+        month_start = today.replace(day=1)
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
+        bills = store.list_bills(include_retired=True)
+        args = (bills, store.payments, store.categories)
+        return {
+            "today": today.isoformat(),
+            "month": cost_breakdown(*args, month_start, next_month - timedelta(days=1)),
+            "year": year_breakdown(*args, today.year),
+            "previous_years": [
+                year_breakdown(*args, y)
+                for y in history_years(bills, store.payments, today)
+            ],
+        }
+
+    async def bill_history_(call: ServiceCall):
+        bill = store.find_bill(call.data["bill"])
+        payments = store.list_payments(bill["id"])
+        payments.sort(key=lambda p: (p["due_date"], p["paid_date"]), reverse=True)
+        return {"bill": bill, "payments": payments,
+                "stats": bill_history(payments, dt_util.now().date())}
+
     optional = SupportsResponse.OPTIONAL
     only = SupportsResponse.ONLY
     for name, handler, schema, resp in (
@@ -143,6 +221,15 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         ("list_bills", list_bills, LIST_BILLS_SCHEMA, only),
         ("list_payments", list_payments, LIST_PAYMENTS_SCHEMA, only),
         ("send_reminders", send_reminders, vol.Schema({}), optional),
+        ("backup", backup_now, vol.Schema({}), optional),
+        ("list_backups", list_backups, vol.Schema({}), only),
+        ("restore_backup", restore_backup, RESTORE_BACKUP_SCHEMA, optional),
+        ("add_category", add_category, ADD_CATEGORY_SCHEMA, optional),
+        ("update_category", update_category, UPDATE_CATEGORY_SCHEMA, optional),
+        ("delete_category", delete_category, CATEGORY_SCHEMA, optional),
+        ("list_categories", list_categories, vol.Schema({}), only),
+        ("cost_summary", cost_summary, vol.Schema({}), only),
+        ("bill_history", bill_history_, BILL_SCHEMA, only),
     ):
         hass.services.async_register(
             DOMAIN, name, handler, schema=schema, supports_response=resp

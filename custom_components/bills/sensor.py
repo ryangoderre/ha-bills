@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import BillsCoordinator
 from .entity import BillsEntity
-from .summary import summary_text
+from .summary import summary_text, widget_html, widget_lines, widget_text
 
 
 class NextDueSensor(BillsEntity, SensorEntity):
@@ -84,6 +84,34 @@ class DueThisMonthSensor(BillsEntity, SensorEntity):
         }
 
 
+class SummarySensor(BillsEntity, SensorEntity):
+    """A short readable line for phone widgets, e.g.
+    "Phone due in 2 days · 2 more this week"."""
+
+    _attr_name = "Summary"
+    _attr_icon = "mdi:cash-clock"
+
+    def __init__(self, coordinator: BillsCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "summary")
+
+    @property
+    def native_value(self) -> str:
+        return widget_text(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        nxt = data["next"]
+        currency = self.coordinator.hass.config.currency
+        return {
+            "widget": widget_html(data, currency),
+            "lines": widget_lines(data, currency),
+            "this_week_count": len(data["this_week"]),
+            "overdue_count": len(data["overdue"]),
+            "next_bill_id": nxt["bill_id"] if nxt else None,
+        }
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -94,5 +122,6 @@ async def async_setup_entry(
             DueSoonSensor(coordinator, entry),
             OverdueSensor(coordinator, entry),
             DueThisMonthSensor(coordinator, entry),
+            SummarySensor(coordinator, entry),
         ]
     )
