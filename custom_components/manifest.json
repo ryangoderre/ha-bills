@@ -1,0 +1,11 @@
+{
+  "domain": "bills",
+  "name": "Bills",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/YOUR_USER/ha-bills",
+  "issue_tracker": "https://github.com/YOUR_USER/ha-bills/issues",
+  "codeowners": ["@YOUR_USER"],
+  "requirements": [],
+  "iot_class": "calculated"
+}
