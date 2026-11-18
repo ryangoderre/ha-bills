@@ -5,23 +5,33 @@ import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, EVENT_PAID
-from .schedule import FREQUENCIES
+from .schedule import FREQUENCIES, suggest_restore_due
 from .reminders import fire_reminders
 from .store import BillStore
 
-SERVICES = ("add_bill", "update_bill", "retire_bill", "mark_paid",
+SERVICES = ("add_bill", "update_bill", "retire_bill", "restore_bill", "mark_paid",
             "list_bills", "list_payments", "send_reminders")
 
 _NONNEG_INT = vol.All(vol.Coerce(int), vol.Range(min=0))
+_INTERVAL = vol.All(vol.Coerce(int), vol.Range(min=1))
+_AMOUNT = vol.All(vol.Coerce(float), vol.Range(min=0))
+_NAME = vol.All(cv.string, vol.Strip, vol.Length(min=1))
+
+
+def _clearable(validator):
+    """Accept None (clear the field) as well as a normal value."""
+    return vol.Any(None, validator)
+
 
 ADD_SCHEMA = vol.Schema({
-    vol.Required("name"): cv.string,
+    vol.Required("name"): _NAME,
     vol.Required("due_date"): cv.date,
     vol.Required("frequency"): vol.In(FREQUENCIES),
-    vol.Optional("interval", default=1): vol.All(vol.Coerce(int), vol.Range(min=1)),
-    vol.Optional("amount"): vol.Coerce(float),
+    vol.Optional("interval", default=1): _INTERVAL,
+    vol.Optional("amount"): _AMOUNT,
     vol.Optional("end_date"): cv.date,
     vol.Optional("autopay", default=False): cv.boolean,
     vol.Optional("remind_days_before", default=3): _NONNEG_INT,
@@ -32,23 +42,33 @@ ADD_SCHEMA = vol.Schema({
 
 UPDATE_SCHEMA = vol.Schema({
     vol.Required("bill"): cv.string,
-    vol.Optional("name"): cv.string,
-    vol.Optional("amount"): vol.Coerce(float),
+    vol.Optional("name"): _NAME,
+    vol.Optional("amount"): _clearable(_AMOUNT),
+    vol.Optional("due_date"): cv.date,
+    vol.Optional("frequency"): vol.In(FREQUENCIES),
+    vol.Optional("interval"): _INTERVAL,
+    vol.Optional("end_date"): _clearable(cv.date),
     vol.Optional("autopay"): cv.boolean,
     vol.Optional("remind_days_before"): _NONNEG_INT,
-    vol.Optional("biller_url"): cv.string,
-    vol.Optional("notes"): cv.string,
+    vol.Optional("biller_url"): _clearable(cv.string),
+    vol.Optional("notes"): _clearable(cv.string),
     vol.Optional("tags"): vol.All(cv.ensure_list, [cv.string]),
 })
 
 BILL_SCHEMA = vol.Schema({vol.Required("bill"): cv.string})
 
+RESTORE_SCHEMA = vol.Schema({
+    vol.Required("bill"): cv.string,
+    vol.Optional("due_date"): cv.date,
+})
+
 PAID_SCHEMA = vol.Schema({
     vol.Required("bill"): cv.string,
-    vol.Optional("amount"): vol.Coerce(float),
+    vol.Optional("amount"): _AMOUNT,
     vol.Optional("paid_date"): cv.date,
     vol.Optional("confirmation"): cv.string,
     vol.Optional("note"): cv.string,
+    vol.Optional("update_amount", default=False): cv.boolean,
 })
 
 LIST_BILLS_SCHEMA = vol.Schema({
@@ -73,11 +93,17 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         bill = await store.async_retire_bill(call.data["bill"])
         return {"bill_id": bill["id"], "retired_on": bill["retired_on"]}
 
+    async def restore_bill(call: ServiceCall):
+        bill = await store.async_restore_bill(
+            call.data["bill"], call.data.get("due_date")
+        )
+        return {"bill_id": bill["id"], "next_due": bill["next_due"]}
+
     async def mark_paid(call: ServiceCall):
         d = call.data
         payment, bill = await store.async_mark_paid(
             d["bill"], d.get("amount"), d.get("paid_date"),
-            d.get("confirmation"), d.get("note"),
+            d.get("confirmation"), d.get("note"), d["update_amount"],
         )
         hass.bus.async_fire(EVENT_PAID, {
             "bill_id": bill["id"],
@@ -87,7 +113,15 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         return {"payment": payment, "next_due": bill["next_due"]}
 
     async def list_bills(call: ServiceCall):
-        return {"bills": store.list_bills(call.data["include_retired"])}
+        today = dt_util.now().date()
+        bills = []
+        for b in store.list_bills(call.data["include_retired"]):
+            if not b["active"]:
+                # The date restore_bill would use if no due_date is given.
+                due = suggest_restore_due(b, today)
+                b = {**b, "restore_due": due.isoformat() if due else None}
+            bills.append(b)
+        return {"bills": bills}
 
     async def list_payments(call: ServiceCall):
         ref = call.data.get("bill")
@@ -104,6 +138,7 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         ("add_bill", add_bill, ADD_SCHEMA, optional),
         ("update_bill", update_bill, UPDATE_SCHEMA, optional),
         ("retire_bill", retire_bill, BILL_SCHEMA, optional),
+        ("restore_bill", restore_bill, RESTORE_SCHEMA, optional),
         ("mark_paid", mark_paid, PAID_SCHEMA, optional),
         ("list_bills", list_bills, LIST_BILLS_SCHEMA, only),
         ("list_payments", list_payments, LIST_PAYMENTS_SCHEMA, only),

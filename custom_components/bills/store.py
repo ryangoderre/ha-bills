@@ -17,6 +17,7 @@ from .const import STORAGE_KEY, STORAGE_VERSION
 
 UPDATABLE = ("name", "amount", "notes", "biller_url", "autopay",
              "remind_days_before", "tags")
+SCHEDULE_FIELDS = ("due_date", "frequency", "interval", "end_date")
 
 
 def _iso(d: date | None) -> str | None:
@@ -67,6 +68,13 @@ class BillStore:
     async def async_add_bill(self, data: dict[str, Any]) -> dict[str, Any]:
         bill_id = uuid4().hex
         due: date = data["due_date"]
+        end: date | None = data.get("end_date")
+        if data["frequency"] == "once":
+            end = None
+        try:
+            schedule.check_end_date(due, data["frequency"], end)
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
         bill = {
             "id": bill_id,
             "name": data["name"],
@@ -75,7 +83,7 @@ class BillStore:
             "interval": data["interval"],
             "anchor_date": due.isoformat(),
             "next_due": due.isoformat(),
-            "end_date": _iso(data.get("end_date")),
+            "end_date": _iso(end),
             "active": True,
             "retired_on": None,
             "tags": data["tags"],
@@ -90,16 +98,40 @@ class BillStore:
 
     async def async_update_bill(self, ref: str, changes: dict[str, Any]):
         bill = self.find_bill(ref)
+        new_schedule = None
+        if any(k in changes for k in SCHEDULE_FIELDS):
+            try:
+                new_schedule = schedule.reschedule(bill, changes)
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
         for key in UPDATABLE:
             if key in changes:
                 bill[key] = changes[key]
+        if new_schedule:
+            bill.update(new_schedule)
         await self._async_save()
         return bill
 
     async def async_retire_bill(self, ref: str) -> dict[str, Any]:
         bill = self.find_bill(ref)
+        if not bill["active"]:
+            raise ServiceValidationError(f"'{bill['name']}' is already retired")
         bill["active"] = False
         bill["retired_on"] = dt_util.now().date().isoformat()
+        await self._async_save()
+        return bill
+
+    async def async_restore_bill(
+        self, ref: str, due_date: date | None = None
+    ) -> dict[str, Any]:
+        bill = self.find_bill(ref)
+        try:
+            plan = schedule.restore_plan(bill, dt_util.now().date(), due_date)
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        bill.update(plan)
+        bill["active"] = True
+        bill["retired_on"] = None
         await self._async_save()
         return bill
 
@@ -110,6 +142,7 @@ class BillStore:
         paid_date: date | None = None,
         confirmation: str | None = None,
         note: str | None = None,
+        update_amount: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         bill = self.find_bill(ref)
         if not bill["active"] or not bill["next_due"]:
@@ -129,6 +162,8 @@ class BillStore:
             "note": note,
         }
         self.payments.append(payment)
+        if update_amount and amount is not None:
+            bill["amount"] = amount  # use what was paid as the new estimate
 
         end = date.fromisoformat(bill["end_date"]) if bill["end_date"] else None
         nxt = schedule.next_after(

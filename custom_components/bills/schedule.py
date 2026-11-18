@@ -98,3 +98,91 @@ def occurrences_between(
 
 def days_until(due: date, today: date) -> int:
     return (due - today).days
+
+
+def check_end_date(due: date, frequency: str, end_date: date | None) -> None:
+    if frequency != "once" and end_date is not None and end_date < due:
+        raise ValueError("The end date can't be before the due date")
+
+
+def reschedule(bill: dict, changes: dict) -> dict:
+    """Work out a bill's new schedule fields after an edit.
+
+    `changes` may hold due_date, frequency, interval and end_date (dates as
+    date objects, end_date may be None to clear it). The result has the
+    schedule fields to store on the bill.
+
+    If the due date, frequency or interval change, the series restarts from
+    the new due date. If only the end date changes, the original anchor is
+    kept, so a bill on the 31st keeps landing on month ends.
+    """
+    if not bill["active"] or not bill["next_due"]:
+        raise ValueError("A retired bill can't be rescheduled")
+    cur_due = date.fromisoformat(bill["next_due"])
+    cur_end = date.fromisoformat(bill["end_date"]) if bill["end_date"] else None
+
+    due = changes.get("due_date") or cur_due
+    frequency = changes.get("frequency", bill["frequency"])
+    interval = changes.get("interval", bill["interval"])
+    end = changes["end_date"] if "end_date" in changes else cur_end
+    validate(frequency, interval)
+    if frequency == "once":
+        end = None
+    check_end_date(due, frequency, end)
+
+    same_series = (due, frequency, interval) == (
+        cur_due, bill["frequency"], bill["interval"]
+    )
+    return {
+        "anchor_date": bill["anchor_date"] if same_series else due.isoformat(),
+        "next_due": due.isoformat(),
+        "frequency": frequency,
+        "interval": interval,
+        "end_date": end.isoformat() if end else None,
+    }
+
+def suggest_restore_due(bill: dict, today: date) -> date | None:
+    """A sensible next due date for bringing a retired bill back.
+
+    Keeps the old due date if it hasn't passed (undoing a mistaken retire),
+    otherwise the next date on the bill's schedule from today. None when the
+    schedule has nothing left (a paid one-time bill, or past its end date).
+    """
+    if bill["next_due"] and date.fromisoformat(bill["next_due"]) >= today:
+        return date.fromisoformat(bill["next_due"])
+    end = date.fromisoformat(bill["end_date"]) if bill["end_date"] else None
+    return next_on_or_after(
+        date.fromisoformat(bill["anchor_date"]),
+        bill["frequency"], bill["interval"], today, end,
+    )
+
+
+def restore_plan(bill: dict, today: date, due: date | None = None) -> dict:
+    """Schedule fields for restoring a retired bill.
+
+    Without `due`, uses suggest_restore_due. If the date is on the bill's
+    existing schedule the original anchor is kept; otherwise the series
+    restarts from it. An end date before the new due date is cleared, since
+    the bill would otherwise end immediately.
+    """
+    if bill["active"]:
+        raise ValueError(f"'{bill['name']}' isn't retired")
+    if due is None:
+        due = suggest_restore_due(bill, today)
+        if due is None:
+            raise ValueError(
+                f"'{bill['name']}' has no dates left on its schedule; "
+                "pick a new due date"
+            )
+    anchor = date.fromisoformat(bill["anchor_date"])
+    on_schedule = next_on_or_after(
+        anchor, bill["frequency"], bill["interval"], due
+    ) == due
+    end = date.fromisoformat(bill["end_date"]) if bill["end_date"] else None
+    if end is not None and end < due:
+        end = None
+    return {
+        "anchor_date": anchor.isoformat() if on_schedule else due.isoformat(),
+        "next_due": due.isoformat(),
+        "end_date": end.isoformat() if end else None,
+    }

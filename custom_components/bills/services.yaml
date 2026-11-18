@@ -40,7 +40,10 @@ add_bill:
 
 update_bill:
   name: Update bill
-  description: Change details of an existing bill (not its schedule).
+  description: >-
+    Change details of an existing bill. Changing the due date, frequency or
+    interval restarts the schedule from the new due date. Set amount,
+    end_date, biller_url or notes to null to clear them.
   fields:
     bill:
       required: true
@@ -50,6 +53,17 @@ update_bill:
     amount:
       selector:
         number: {min: 0, step: 0.01, mode: box}
+    due_date:
+      selector: {date: }
+    frequency:
+      selector:
+        select:
+          options: [once, weekly, monthly, yearly]
+    interval:
+      selector:
+        number: {min: 1, max: 60, mode: box}
+    end_date:
+      selector: {date: }
     autopay:
       selector: {boolean: }
     remind_days_before:
@@ -71,6 +85,19 @@ retire_bill:
       required: true
       selector: {text: }
 
+restore_bill:
+  name: Restore bill
+  description: >-
+    Bring a retired bill back. Without a due date it keeps the old due date if
+    that hasn't passed, otherwise uses the next date on its schedule from today.
+    An end date that has already passed is cleared.
+  fields:
+    bill:
+      required: true
+      selector: {text: }
+    due_date:
+      selector: {date: }
+
 mark_paid:
   name: Mark paid
   description: Record a payment for a bill's current due date and advance it.
@@ -87,6 +114,11 @@ mark_paid:
       selector: {text: }
     note:
       selector: {text: }
+    update_amount:
+      name: Use as new estimate
+      description: Save the amount paid as the bill's amount going forward.
+      default: false
+      selector: {boolean: }
 
 list_bills:
   name: List bills
