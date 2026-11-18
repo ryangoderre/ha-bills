@@ -7,5 +7,6 @@
   "issue_tracker": "https://github.com/YOUR_USER/ha-bills/issues",
   "codeowners": ["@ryangoderre"],
   "requirements": [],
+  "dependencies": ["http", "frontend", "panel_custom"],
   "iot_class": "calculated"
 }

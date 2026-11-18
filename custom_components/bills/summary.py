@@ -57,3 +57,40 @@ def compute_summary(bills: list[dict[str, Any]], today: date) -> dict[str, Any]:
         "due_this_month_unpriced": unpriced,
         "active_count": len(rows),
     }
+def summary_text(v: dict[str, Any]) -> str:
+    d = v["days_until"]
+    if d < 0:
+        when = f"overdue by {-d} day{'s' if d != -1 else ''}"
+    elif d == 0:
+        when = "due today"
+    elif d == 1:
+        when = "due tomorrow"
+    else:
+        when = f"due in {d} days"
+    return f"{v['name']} {when}"
+
+
+def compute_reminders(bills: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+    """Bills that are overdue, due today, or inside their reminder window."""
+    out = []
+    for b in bills:
+        if not (b["active"] and b["next_due"]):
+            continue
+        v = _view(b, today)
+        d = v["days_until"]
+        if d < 0:
+            kind = "overdue"
+        elif d == 0:
+            kind = "due_today"
+        elif d <= b["remind_days_before"]:
+            kind = "upcoming"
+        else:
+            continue
+        out.append({
+            **v,
+            "kind": kind,
+            "biller_url": b.get("biller_url"),
+            "summary": summary_text(v),
+        })
+    out.sort(key=lambda r: (r["due_date"], r["name"].lower()))
+    return out

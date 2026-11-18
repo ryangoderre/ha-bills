@@ -6,12 +6,13 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_PAID
 from .schedule import FREQUENCIES
+from .reminders import fire_reminders
 from .store import BillStore
 
 SERVICES = ("add_bill", "update_bill", "retire_bill", "mark_paid",
-            "list_bills", "list_payments")
+            "list_bills", "list_payments", "send_reminders")
 
 _NONNEG_INT = vol.All(vol.Coerce(int), vol.Range(min=0))
 
@@ -78,6 +79,11 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
             d["bill"], d.get("amount"), d.get("paid_date"),
             d.get("confirmation"), d.get("note"),
         )
+        hass.bus.async_fire(EVENT_PAID, {
+            "bill_id": bill["id"],
+            "bill_name": bill["name"],
+            "next_due": bill["next_due"],
+        })
         return {"payment": payment, "next_due": bill["next_due"]}
 
     async def list_bills(call: ServiceCall):
@@ -88,6 +94,10 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         bill_id = store.find_bill(ref)["id"] if ref else None
         return {"payments": store.list_payments(bill_id)}
 
+    async def send_reminders(call: ServiceCall):
+        sent = fire_reminders(hass, store)
+        return {"sent": len(sent), "reminders": sent}
+
     optional = SupportsResponse.OPTIONAL
     only = SupportsResponse.ONLY
     for name, handler, schema, resp in (
@@ -97,6 +107,7 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         ("mark_paid", mark_paid, PAID_SCHEMA, optional),
         ("list_bills", list_bills, LIST_BILLS_SCHEMA, only),
         ("list_payments", list_payments, LIST_PAYMENTS_SCHEMA, only),
+        ("send_reminders", send_reminders, vol.Schema({}), optional),
     ):
         hass.services.async_register(
             DOMAIN, name, handler, schema=schema, supports_response=resp

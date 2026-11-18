@@ -10,3 +10,4 @@ services:
     volumes:
       - ./config:/config
       - ./custom_components/bills:/config/custom_components/bills
+      - ./blueprints:/config/blueprints/automation/bills

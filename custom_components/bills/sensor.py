@@ -11,19 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import BillsCoordinator
 from .entity import BillsEntity
-
-
-def _summary_text(v: dict[str, Any]) -> str:
-    d = v["days_until"]
-    if d < 0:
-        when = f"overdue by {-d} day{'s' if d != -1 else ''}"
-    elif d == 0:
-        when = "due today"
-    elif d == 1:
-        when = "due tomorrow"
-    else:
-        when = f"due in {d} days"
-    return f"{v['name']} {when}"
+from .summary import summary_text
 
 
 class NextDueSensor(BillsEntity, SensorEntity):
@@ -41,7 +29,7 @@ class NextDueSensor(BillsEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         nxt = self.coordinator.data["next"]
-        return {**nxt, "summary": _summary_text(nxt)} if nxt else {}
+        return {**nxt, "summary": summary_text(nxt)} if nxt else {}
 
 
 class DueSoonSensor(BillsEntity, SensorEntity):

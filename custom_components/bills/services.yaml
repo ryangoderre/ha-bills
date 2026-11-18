@@ -102,3 +102,7 @@ list_payments:
   fields:
     bill:
       selector: {text: }
+
+send_reminders:
+  name: Send reminders
+  description: Fire a bills_reminder event for every bill that is overdue, due today or inside its reminder window. Runs automatically daily at 9:00.

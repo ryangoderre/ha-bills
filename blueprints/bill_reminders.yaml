@@ -1,0 +1,64 @@
+blueprint:
+  name: Bill reminders
+  description: >
+    Sends a push notification for every bills_reminder event with a Pay bill
+    button that opens the Bills panel's payment form. Clears the notification
+    when the bill is paid.
+  domain: automation
+  input:
+    notify_service:
+      name: Notify service
+      description: The phone's notify service, e.g. notify.mobile_app_your_phone
+      selector:
+        text:
+    panel_path:
+      name: Bills panel path
+      default: /bills
+      selector:
+        text:
+
+mode: parallel
+max: 20
+
+variables:
+  d: "{{ trigger.event.data }}"
+  panel_path: !input panel_path
+
+triggers:
+  - trigger: event
+    event_type: bills_reminder
+    id: reminder
+  - trigger: event
+    event_type: bills_paid
+    id: paid
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: reminder
+        sequence:
+          - action: !input notify_service
+            data:
+              title: "{{ d.name }}"
+              message: >-
+                {{ d.summary }}{% if d.amount is not none %} · est. {{ '%.2f' | format(d.amount) }}{% endif %}
+              data:
+                tag: "bills_{{ d.bill_id }}"
+                url: "{{ panel_path }}?pay={{ d.bill_id }}"
+                clickAction: "{{ panel_path }}?pay={{ d.bill_id }}"
+                actions: >-
+                  {%- set a = [{'action': 'URI', 'title': 'Pay bill', 'uri': panel_path ~ '?pay=' ~ d.bill_id}] -%}
+                  {%- if d.biller_url -%}
+                  {%- set a = a + [{'action': 'URI', 'title': 'Biller site', 'uri': d.biller_url}] -%}
+                  {%- endif -%}
+                  {{ a }}
+      - conditions:
+          - condition: trigger
+            id: paid
+        sequence:
+          - action: !input notify_service
+            data:
+              message: clear_notification
+              data:
+                tag: "bills_{{ d.bill_id }}"

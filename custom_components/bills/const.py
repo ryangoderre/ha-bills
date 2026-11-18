@@ -1,3 +1,6 @@
 DOMAIN = "bills"
 STORAGE_KEY = f"{DOMAIN}.data"
 STORAGE_VERSION = 1
+EVENT_REMINDER = f"{DOMAIN}_reminder"
+REMINDER_HOUR = 9
+EVENT_PAID = f"{DOMAIN}_paid"

@@ -1,6 +1,6 @@
 from datetime import date
 
-from custom_components.bills.summary import compute_summary
+from custom_components.bills.summary import compute_reminders, compute_summary
 
 TODAY = date(2026, 11, 17)
 
@@ -63,3 +63,26 @@ def test_bills_without_amount_are_counted_separately():
 
 def test_retired_bills_ignored():
     assert compute_summary([make("Old", "2026-11-18", active=False)], TODAY)["next"] is None
+
+def test_reminder_kinds():
+    bills = [
+        make("Water", "2026-11-10"),
+        make("Today", "2026-11-17"),
+        make("Phone", "2026-11-19", remind=3),
+        make("Gym", "2026-11-25", remind=3),
+    ]
+    got = [(r["name"], r["kind"]) for r in compute_reminders(bills, TODAY)]
+    assert got == [("Water", "overdue"), ("Today", "due_today"), ("Phone", "upcoming")]
+
+
+def test_reminders_skip_retired_bills():
+    assert compute_reminders([make("Old", "2026-11-18", active=False)], TODAY) == []
+
+
+def test_reminder_payload_has_what_the_blueprint_needs():
+    b = make("Phone", "2026-11-19")
+    b["biller_url"] = "https://example.com/pay"
+    r = compute_reminders([b], TODAY)[0]
+    assert r["summary"] == "Phone due in 2 days"
+    assert r["biller_url"] == "https://example.com/pay"
+    assert r["bill_id"] == "phone"
