@@ -1,13 +1,13 @@
 {
   "domain": "bills",
-  "name": "Bills",
+  "name": "Bills & Budget",
   "codeowners": ["@ryangoderre"],
   "config_flow": true,
   "dependencies": ["http", "frontend", "panel_custom"],
-  "documentation": "https://github.com/ryangoderre/ha-bills",
+  "documentation": "https://github.com/ryangoderre/ha-bills-budget",
   "iot_class": "calculated",
-  "issue_tracker": "https://github.com/ryangoderre/ha-bills/issues",
+  "issue_tracker": "https://github.com/ryangoderre/ha-bills-budget/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

@@ -10,6 +10,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
 from .backup import stamped_name as backup_name
+from .budget import STREAM_FREQUENCIES, STREAM_TYPES
 from .const import DOMAIN, EVENT_PAID
 from .schedule import FREQUENCIES, suggest_restore_due
 from .summary import bill_history, cost_breakdown, history_years, year_breakdown
@@ -20,7 +21,10 @@ SERVICES = ("add_bill", "update_bill", "retire_bill", "restore_bill", "mark_paid
             "list_bills", "list_payments", "send_reminders",
             "backup", "list_backups", "restore_backup",
             "add_category", "update_category", "delete_category",
-            "list_categories", "cost_summary", "bill_history")
+            "list_categories", "cost_summary", "bill_history",
+            "budget_setup", "add_expense", "add_income", "move_to_savings",
+            "take_from_savings", "delete_transaction", "add_recurring",
+            "update_recurring", "delete_recurring", "budget_summary")
 
 _NONNEG_INT = vol.All(vol.Coerce(int), vol.Range(min=0))
 _INTERVAL = vol.All(vol.Coerce(int), vol.Range(min=1))
@@ -102,6 +106,53 @@ UPDATE_CATEGORY_SCHEMA = vol.Schema({
 })
 
 CATEGORY_SCHEMA = vol.Schema({vol.Required("category"): cv.string})
+
+_POSITIVE = vol.All(vol.Coerce(float), vol.Range(min=0.01))
+
+BUDGET_SETUP_SCHEMA = vol.Schema({
+    vol.Optional("start_date"): cv.date,
+    vol.Optional("starting_amount", default=0.0): vol.Coerce(float),
+    vol.Optional("starting_savings", default=0.0): _AMOUNT,
+})
+
+TRANSACTION_SCHEMA = vol.Schema({
+    vol.Required("amount"): _POSITIVE,
+    vol.Optional("category"): cv.string,
+    vol.Optional("note"): cv.string,
+    vol.Optional("date"): cv.date,
+})
+
+SAVINGS_MOVE_SCHEMA = vol.Schema({
+    vol.Required("amount"): _POSITIVE,
+    vol.Optional("note"): cv.string,
+    vol.Optional("date"): cv.date,
+})
+
+DELETE_TRANSACTION_SCHEMA = vol.Schema({vol.Required("transaction"): cv.string})
+
+ADD_RECURRING_SCHEMA = vol.Schema({
+    vol.Required("type"): vol.In(STREAM_TYPES),
+    vol.Required("amount"): _POSITIVE,
+    vol.Required("frequency"): vol.In(STREAM_FREQUENCIES),
+    vol.Optional("interval", default=1): _INTERVAL,
+    vol.Optional("name"): cv.string,
+    vol.Optional("category"): cv.string,
+    vol.Optional("start_date"): cv.date,
+    vol.Optional("end_date"): cv.date,
+})
+
+UPDATE_RECURRING_SCHEMA = vol.Schema({
+    vol.Required("recurring"): cv.string,
+    vol.Optional("name"): _NAME,
+    vol.Optional("amount"): _POSITIVE,
+    vol.Optional("frequency"): vol.In(STREAM_FREQUENCIES),
+    vol.Optional("interval"): _INTERVAL,
+    vol.Optional("category"): _clearable(cv.string),
+    vol.Optional("start_date"): cv.date,
+    vol.Optional("end_date"): _clearable(cv.date),
+})
+
+RECURRING_SCHEMA = vol.Schema({vol.Required("recurring"): cv.string})
 
 
 def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
@@ -210,6 +261,36 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         return {"bill": bill, "payments": payments,
                 "stats": bill_history(payments, dt_util.now().date())}
 
+    async def budget_setup(call: ServiceCall):
+        d = call.data
+        b = await store.async_budget_setup(
+            d.get("start_date"), d["starting_amount"], d["starting_savings"])
+        return {"start_date": b["start_date"]}
+
+    def _tx(kind: str):
+        async def handler(call: ServiceCall):
+            d = call.data
+            tx = await store.async_add_transaction(
+                kind, d["amount"], d.get("category"), d.get("note"), d.get("date"))
+            return {"transaction": tx, "today": store.budget_summary()["today"]}
+        return handler
+
+    async def delete_transaction(call: ServiceCall):
+        return {"deleted": await store.async_delete_transaction(call.data["transaction"])}
+
+    async def add_recurring(call: ServiceCall):
+        return {"recurring": await store.async_add_stream(dict(call.data))}
+
+    async def update_recurring(call: ServiceCall):
+        changes = dict(call.data)
+        return {"recurring": await store.async_update_stream(changes.pop("recurring"), changes)}
+
+    async def delete_recurring(call: ServiceCall):
+        return {"deleted": await store.async_delete_stream(call.data["recurring"])}
+
+    async def budget_summary(call: ServiceCall):
+        return store.budget_summary()
+
     optional = SupportsResponse.OPTIONAL
     only = SupportsResponse.ONLY
     for name, handler, schema, resp in (
@@ -230,6 +311,16 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         ("list_categories", list_categories, vol.Schema({}), only),
         ("cost_summary", cost_summary, vol.Schema({}), only),
         ("bill_history", bill_history_, BILL_SCHEMA, only),
+        ("budget_setup", budget_setup, BUDGET_SETUP_SCHEMA, optional),
+        ("add_expense", _tx("expense"), TRANSACTION_SCHEMA, optional),
+        ("add_income", _tx("income"), TRANSACTION_SCHEMA, optional),
+        ("move_to_savings", _tx("to_savings"), SAVINGS_MOVE_SCHEMA, optional),
+        ("take_from_savings", _tx("from_savings"), SAVINGS_MOVE_SCHEMA, optional),
+        ("delete_transaction", delete_transaction, DELETE_TRANSACTION_SCHEMA, optional),
+        ("add_recurring", add_recurring, ADD_RECURRING_SCHEMA, optional),
+        ("update_recurring", update_recurring, UPDATE_RECURRING_SCHEMA, optional),
+        ("delete_recurring", delete_recurring, RECURRING_SCHEMA, optional),
+        ("budget_summary", budget_summary, vol.Schema({}), only),
     ):
         hass.services.async_register(
             DOMAIN, name, handler, schema=schema, supports_response=resp

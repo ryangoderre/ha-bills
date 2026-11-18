@@ -1,8 +1,9 @@
-# Bills for Home Assistant
+# Bills & Budget for Home Assistant
 
-Track recurring bills in Home Assistant: due dates, reminders on your phone,
-payment history, and what you're spending by category, month and year.
-Everything stays on your Home Assistant; nothing is sent to an outside service.
+Track recurring bills and a daily spending budget in Home Assistant: due dates,
+reminders on your phone, payment history, what you're spending by category,
+and how much you can spend today. Everything stays on your Home Assistant;
+nothing is sent to an outside service.
 
 - **Bills panel** in the sidebar to add, edit, pay, retire and restore bills
 - **Categories** with icons, and cost summaries for this month, this year and
@@ -11,7 +12,10 @@ Everything stays on your Home Assistant; nothing is sent to an outside service.
 - **Reminders** each morning for bills that are due soon or overdue, with a
   *Pay bill* button that opens the payment form
 - **Sensors and a calendar** for dashboards and phone widgets
-- **Daily backups** of your bills, with one-step restore
+- **Daily budget**: how much you can spend today, worked out from your income,
+  bills and savings, with over- or underspending carried to the next day
+- **Savings** plans and one-off moves, with an all-time total
+- **Daily backups** of everything, with one-step restore
 
 ## Requirements
 
@@ -21,12 +25,12 @@ Home Assistant 2024.11 or newer.
 
 ### HACS (recommended)
 
-[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ryangoderre&repository=ha-bills&category=integration)
+[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ryangoderre&repository=ha-bills-budget&category=integration)
 
 Or by hand:
 
 1. In HACS, open the **⋮** menu → **Custom repositories**.
-2. Add `https://github.com/ryangoderre/ha-bills` with the type **Integration**.
+2. Add `https://github.com/ryangoderre/ha-bills-budget` with the type **Integration**.
 3. Find **Bills** in HACS, download it, and restart Home Assistant.
 
 ### Manual
@@ -39,7 +43,8 @@ folder and restart Home Assistant.
 [![Open your Home Assistant instance and start setting up Bills.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=bills)
 
 Or go to **Settings → Devices & services → Add integration** and search for
-**Bills**. There are no options to fill in. A **Bills** item appears in the sidebar.
+**Bills & Budget**. There are no options to fill in. A **Bills & Budget** item
+appears in the sidebar, with **Bills**, **Budget** and **Categories** tabs.
 
 ## Using the Bills panel
 
@@ -55,8 +60,8 @@ Or go to **Settings → Devices & services → Add integration** and search for
   section.
 - **Tap a bill's name** to see its payment history: last payment and change,
   average, range, trend, year over year, a chart and the list of payments.
-- **Categories** (top of the panel): name and icon for each. Deleting a category
-  makes its bills uncategorized.
+- **Categories** (its own tab, shared by bills and the budget): name and icon
+  for each. Deleting a category makes its bills uncategorized.
 
 ### How costs are counted
 
@@ -69,6 +74,57 @@ separately rather than guessed. Bars show how much of each total is paid.
 Autopay bills behave like any other bill: they're reminded and stay due until
 you record the payment, so you can confirm the charge went through.
 
+## Budget
+
+The **Budget** tab works out how much you can spend today.
+
+**Set up** (and **Budget reset** at the bottom of the tab later): pick a start date (today by default), what spending money you're
+starting with, and any savings you already have. Then add your recurring income.
+
+**How the daily number works.** Each day earns an allowance:
+
+> recurring income per day − bills per day − savings plans per day
+
+A $2,400 paycheck every 2 weeks adds $171.43 to every day; $1,500 rent a month
+takes $49.28 a day; $150 to savings every 2 weeks takes $10.71 a day. Bills use
+their estimates (bills without an amount aren't counted); one-time bills come
+out on the day you pay them.
+
+**When a bill costs more or less than its estimate**, the difference is settled
+on the day you pay it: paying $52 for a $40 water bill takes $12 out of that
+day's budget, and paying $35 gives $5 back. These show in Transactions as
+*Water: $12.00 over estimate*. Each payment remembers the estimate it was
+measured against, so changing a bill's estimate later never changes past
+adjustments.
+
+**Today's budget** = what carried over + today's allowance + one-off income
+today − expenses today. It updates as soon as you add something. Spend less
+and the rest carries to tomorrow; spend more and tomorrow starts lower. The top
+of the tab shows today and the next two days.
+
+At midnight each finished day is locked in, so changing a paycheck, a savings
+plan or a bill's estimate only changes today onward, never the past. (A
+**Budget reset** starts over from its new start date, so days from then on are
+worked out again with the current amounts.)
+
+**Adding things** (**+ Add**):
+
+- **Expense**: amount, category, optional note (it uses the category name if
+  you leave it empty), date.
+- **Income**: *One-off* adds it to that day's budget (e.g. card rewards).
+  *Every week / Every 2 weeks / Monthly / Yearly* adds recurring income with a
+  start date and an optional end date (leave it empty if it's open-ended and
+  add one later with **Edit**).
+
+**Savings**: add plans (e.g. $150 every 2 weeks) that come out before the
+daily number, and **Move to savings** / **Take from savings** for one-off
+amounts. *All-time savings* is what you started with plus everything set aside
+since.
+
+**Quick add from your phone**: open the panel at `/bills?add=expense` (or
+`?add=income`) to go straight to the form; see *Phone widgets* below. The panel
+also remembers which tab you used last.
+
 ## Reminders on your phone
 
 Bills fires a `bills_reminder` event each day at 9:00 for every bill that's
@@ -80,7 +136,7 @@ The included blueprint turns these into phone notifications with a **Pay bill**
 button (and a **Biller site** button if the bill has a payment website). It
 clears the notification when the bill is paid.
 
-[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fryangoderre%2Fha-bills%2Fblob%2Fmain%2Fblueprints%2Fbill_reminders.yaml)
+[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fryangoderre%2Fha-bills-budget%2Fblob%2Fmain%2Fblueprints%2Fbill_reminders.yaml)
 
 After importing, create an automation from it and enter:
 
@@ -97,24 +153,30 @@ After importing, create an automation from it and enter:
 | `sensor.bills_overdue` | How many bills are overdue | `bills` |
 | `sensor.bills_due_this_month` | Unpaid amount due by the end of the month | `bills_without_amount` |
 | `calendar.bills` | Every upcoming due date | Each event's description has the category, amount and autopay |
+| `sensor.bills_budget_today` | Today's budget | `tomorrow`, `day_after`, `days`, `daily_allowance`, `spent_today`, `summary` (e.g. *Today $42.10 · Tomorrow $101.36 · Fri $160.62*), `widget` (for Android) |
+| `sensor.bills_savings_total` | All-time savings | `per_month` from regular plans |
 
 ## Phone widgets
 
 **Android** (Home Assistant app → home screen widgets → **Template**):
 
-- One line: `{{ states('sensor.bills_summary') }}`
+- Today's budget and the next two days:
+  `{{ state_attr('sensor.bills_budget_today','widget') }}`
+- Bills, one line: `{{ states('sensor.bills_summary') }}`
 - Bills due this week (bold when overdue):
   `{{ state_attr('sensor.bills_summary','widget') }}`
 
-The Android template widget can't open a page when tapped. To get to the panel
-in one tap, add a shortcut to `/bills` (Companion app settings → **Manage
-shortcuts**) and pin it next to the widget.
+The Android template widget can't open a page when tapped. For one-tap adding,
+create shortcuts (Companion app settings → **Manage shortcuts**) to
+`/bills?add=expense` and `/bills` and pin them next to the widget.
 
 **iPhone, iPad and Mac** (Home Assistant app widgets):
 
-- **Sensors** → *Bills Summary* for the one-line summary
+- **Sensors** → *Bills Budget today* (and *Bills Savings total*) for the budget
+- **Sensors** → *Bills Summary* for the one-line bills summary
 - **Calendar** → *Bills* for upcoming due dates
-- **Open Page** → *Bills* to open the panel in one tap
+- **Open Page** → *Bills & Budget* to open the panel in one tap (it opens on
+  the tab you used last)
 
 ## Services
 
@@ -133,6 +195,12 @@ Ones marked *returns* give back data (use *Developer tools → Actions* with
 | `cost_summary` | *Returns* this month, this year (with months) and previous years, by category. |
 | `add_category`, `update_category`, `delete_category`, `list_categories` | Manage categories. |
 | `send_reminders` | Fire reminder events now (doesn't affect the daily run). |
+| `budget_setup` | Start or restart the budget (start date, starting amount, starting savings). |
+| `add_expense`, `add_income` | Record spending / one-off income (amount, optional category, note, date). *Returns* today's budget. |
+| `move_to_savings`, `take_from_savings` | One-off savings moves. |
+| `delete_transaction` | Remove an expense, income or savings move. |
+| `add_recurring`, `update_recurring`, `delete_recurring` | Recurring income (`type: income`) or savings plans (`type: savings`). Every 2 weeks is `frequency: weekly`, `interval: 2`. |
+| `budget_summary` | *Returns* today's budget, the next days, the allowance, savings, recurring items and recent transactions. |
 | `backup`, `list_backups`, `restore_backup` | See below. |
 
 Bills can be referred to by id or by name; categories by id or name too.
@@ -142,14 +210,14 @@ Events: `bills_reminder` (one per bill to remind about) and `bills_paid`
 
 ## Backups
 
-Your bills live in `.storage/bills.data`, which Home Assistant's own backups
+Your bills and budget live in `.storage/bills.data`, which Home Assistant's own backups
 include. In addition, Bills writes a readable copy to `config/bills_backups/`
 every day (the latest 14 are kept):
 
 - `bills.backup` saves a copy now (`bills-manual-….json`, never removed automatically).
 - `bills.list_backups` shows the files.
 - `bills.restore_backup` with `file: bills-2026-11-18.json` replaces all bills,
-  payments and categories with that copy. A `bills-before-restore-….json` copy
+  payments, categories and the budget with that copy. A `bills-before-restore-….json` copy
   of the current data is saved first.
 
 These copies sit on the same disk as Home Assistant. For protection against a
@@ -169,7 +237,7 @@ integration and the blueprint mounted in:
 docker compose up -d
 ```
 
-The schedule, summary and backup logic is plain Python and tested without Home
+The schedule, summary, budget and backup logic is plain Python and tested without Home
 Assistant:
 
 ```sh

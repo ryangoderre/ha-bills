@@ -2,12 +2,12 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bills",
-        "description": "Set up the Bills tracker."
+        "title": "Bills & Budget",
+        "description": "Track bills, reminders and a daily spending budget."
       }
     },
     "abort": {
-      "single_instance_allowed": "Bills is already set up."
+      "single_instance_allowed": "Bills & Budget is already set up."
     }
   }
 }

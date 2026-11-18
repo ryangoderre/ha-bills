@@ -2,7 +2,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
@@ -45,14 +45,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if name:
             _LOGGER.info("Bills backup written: %s", name)
 
-    @callback
-    def _midnight(now) -> None:
+    async def _midnight(now) -> None:
+        await store.async_freeze_budget()  # lock in yesterday's allowance
         coordinator.async_recompute()
-        hass.async_create_task(_daily_backup())
+        await _daily_backup()
 
     async def _on_started(_hass: HomeAssistant) -> None:
         # Runs once HA has fully started, so automations (the reminder
         # blueprint) are loaded before any catch-up reminders fire.
+        await store.async_freeze_budget()  # days missed while HA was off
+        coordinator.async_recompute()
         await _daily_backup()
         if dt_util.now().hour >= REMINDER_HOUR:
             await _daily_reminders()  # HA was down or restarting at reminder time

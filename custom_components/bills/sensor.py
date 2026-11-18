@@ -11,7 +11,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import BillsCoordinator
 from .entity import BillsEntity
-from .summary import summary_text, widget_html, widget_lines, widget_text
+from .summary import (format_money, summary_text, widget_html,
+                      widget_lines, widget_text)
 
 
 class NextDueSensor(BillsEntity, SensorEntity):
@@ -112,6 +113,80 @@ class SummarySensor(BillsEntity, SensorEntity):
         }
 
 
+def _day_name(iso: str, i: int) -> str:
+    return ("Today", "Tomorrow")[i] if i < 2 else date.fromisoformat(iso).strftime("%a")
+
+
+class BudgetTodaySensor(BillsEntity, SensorEntity):
+    """Today's spending budget, with the next two days in attributes."""
+
+    _attr_name = "Budget today"
+    _attr_icon = "mdi:wallet"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: BillsCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "budget_today")
+        self._attr_native_unit_of_measurement = coordinator.hass.config.currency
+
+    @property
+    def _budget(self) -> dict[str, Any]:
+        return self.coordinator.data["budget"]
+
+    @property
+    def native_value(self) -> float | None:
+        b = self._budget
+        return b["today"] if b["configured"] else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        b = self._budget
+        if not b["configured"]:
+            return {"configured": False}
+        cur = self.coordinator.hass.config.currency
+        days = [{"label": _day_name(d["date"], i), **d} for i, d in enumerate(b["days"])]
+        money = [format_money(d["amount"], cur) for d in days]
+        summary = " · ".join(f"{d['label']} {m}" for d, m in zip(days, money))
+        later = " · ".join(f"{d['label']} {m}" for d, m in zip(days[1:], money[1:]))
+        return {
+            "days": days,
+            "tomorrow": days[1]["amount"],
+            "day_after": days[2]["amount"],
+            "daily_allowance": b["allowance"]["allowance"],
+            "income_per_day": b["allowance"]["income"],
+            "bills_per_day": b["allowance"]["bills"],
+            "savings_per_day": b["allowance"]["savings"],
+            "spent_today": b["spent_today"],
+            "savings_total": b["savings"]["total"],
+            "summary": summary,
+            # Ready-made text for the Android template widget.
+            "widget": f"<b>Today's budget {money[0]}</b><br>{later}",
+        }
+
+
+class SavingsTotalSensor(BillsEntity, SensorEntity):
+    """All-time savings: plans so far, one-off moves and the starting amount."""
+
+    _attr_name = "Savings total"
+    _attr_icon = "mdi:piggy-bank"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: BillsCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "savings_total")
+        self._attr_native_unit_of_measurement = coordinator.hass.config.currency
+
+    @property
+    def native_value(self) -> float | None:
+        b = self.coordinator.data["budget"]
+        return b["savings"]["total"] if b["configured"] else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        b = self.coordinator.data["budget"]
+        return {"per_month": b["savings"]["per_month"]} if b["configured"] else {}
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -123,5 +198,7 @@ async def async_setup_entry(
             OverdueSensor(coordinator, entry),
             DueThisMonthSensor(coordinator, entry),
             SummarySensor(coordinator, entry),
+            BudgetTodaySensor(coordinator, entry),
+            SavingsTotalSensor(coordinator, entry),
         ]
     )

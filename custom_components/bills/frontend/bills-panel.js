@@ -50,10 +50,24 @@ class BillsPanel extends HTMLElement {
     this._yearSel = {};  // year -> selected month index, -1 (or missing) for Total
     this._openYears = new Set();   // years (this one included) that are expanded
     this._showMonths = new Set();  // years showing their Jan … Dec chips
-    // _form: null, or { kind, id } where kind is
-    // "pay" | "edit" | "add" | "restore" | "categories" | "category"
-    const payId = new URLSearchParams(window.location.search).get("pay");
-    this._form = payId ? { kind: "pay", id: payId } : null;
+    this._budget = null;   // from bills.budget_summary
+    this._showAllTx = false;
+    this._confirmTx = null;  // transaction id waiting for "Delete" confirmation
+    // _form: null, or { kind, id, ... } where kind is
+    // "pay" | "edit" | "add" | "restore" | "history" (Bills tab),
+    // "tx" | "stream" | "savemove" | "budgetsetup" (Budget tab) or "category" (Categories tab)
+    const params = new URLSearchParams(window.location.search);
+    const payId = params.get("pay");
+    const add = params.get("add");  // ?add=expense or ?add=income opens the + form
+    let tab = params.get("tab");
+    if (!tab) {
+      try { tab = localStorage.getItem("bills-panel-tab"); } catch (e) { /* private mode */ }
+    }
+    if (payId) tab = "bills";
+    if (add) tab = "budget";
+    this._tab = ["budget", "categories"].includes(tab) ? tab : "bills";
+    this._form = payId ? { kind: "pay", id: payId }
+      : add ? { kind: "tx", id: null, type: add === "income" ? "income" : "expense" } : null;
     this._msg = "";
     this._error = "";
     this._loaded = false;
@@ -69,8 +83,46 @@ class BillsPanel extends HTMLElement {
   set narrow(v) { this._narrow = v; }
   set panel(v) { this._panel = v; }
 
+  connectedCallback() {
+    // Links like /bills?add=expense (widgets, shortcuts) or /bills?pay=<id>
+    // (reminders) can arrive while the panel is already open: the app
+    // navigates inside the page instead of reloading it, so listen for that.
+    this._onLocation = () => this._applyDeepLink();
+    window.addEventListener("location-changed", this._onLocation);
+    window.addEventListener("popstate", this._onLocation);
+    if (this._loaded) this._applyDeepLink();  // panel shown again from the sidebar
+  }
+
   disconnectedCallback() {
     clearTimeout(this._msgTimer);
+    window.removeEventListener("location-changed", this._onLocation);
+    window.removeEventListener("popstate", this._onLocation);
+  }
+
+  _applyDeepLink() {
+    const base = (this._panel && this._panel.url_path) || "bills";
+    if (!window.location.pathname.startsWith("/" + base)) return;  // another page
+    const params = new URLSearchParams(window.location.search);
+    const add = params.get("add");
+    const pay = params.get("pay");
+    if (add) {
+      this._tab = "budget";
+      this._msg = "";
+      this._form = { kind: "tx", id: null, type: add === "income" ? "income" : "expense" };
+    } else if (pay) {
+      this._tab = "bills";
+      if (this._bill(pay)) {
+        this._msg = "";
+        this._form = { kind: "pay", id: pay };
+      } else {
+        this._flash("That bill isn't active anymore.");
+        this._close(false);
+      }
+    } else {
+      return;
+    }
+    this._render();
+    window.scrollTo(0, 0);
   }
 
   _flash(msg) {
@@ -100,12 +152,14 @@ class BillsPanel extends HTMLElement {
 
   async _refresh(initial = false) {
     try {
-      const [b, p, c, costs] = await Promise.all([
+      const [b, p, c, costs, budget] = await Promise.all([
         this._call("list_bills", { include_retired: true }),
         this._call("list_payments"),
         this._call("list_categories"),
         this._call("cost_summary"),
+        this._call("budget_summary"),
       ]);
+      this._budget = budget;
       this._bills = b.bills.filter((x) => x.active);
       this._retired = b.bills.filter((x) => !x.active).sort((x, y) =>
         (y.retired_on || "").localeCompare(x.retired_on || ""));
@@ -113,7 +167,7 @@ class BillsPanel extends HTMLElement {
       this._categories = c.categories;
       this._costs = costs;
       this._error = "";
-      if (initial && this._form && !this._bill(this._form.id)) {
+      if (initial && this._form && this._form.kind === "pay" && !this._bill(this._form.id)) {
         this._flash("That bill isn't active anymore.");
         this._close(false);
       }
@@ -135,8 +189,8 @@ class BillsPanel extends HTMLElement {
     return id ? this._categories.find((c) => c.id === id) : undefined;
   }
 
-  _open(kind, id = null) {
-    this._form = { kind, id };
+  _open(kind, id = null, extra = {}) {
+    this._form = { kind, id, ...extra };
     this._msg = "";
     this._render();
     window.scrollTo(0, 0);
@@ -526,6 +580,433 @@ class BillsPanel extends HTMLElement {
       ${items}${more}`;
   }
 
+  // ---------- budget tab ----------
+
+  _setTab(tab) {
+    this._tab = tab;
+    try { localStorage.setItem("bills-panel-tab", tab); } catch (e) { /* private mode */ }
+    this._close(false);
+    this._render();
+  }
+
+  _dayLabel(iso, i) {
+    if (i === 0) return "Today";
+    if (i === 1) return "Tomorrow";
+    return new Date(iso + "T00:00:00").toLocaleDateString(undefined, { weekday: "long" });
+  }
+
+  _often(s) {
+    const n = s.interval;
+    if (s.frequency === "weekly") return n === 1 ? "every week" : `every ${n} weeks`;
+    if (s.frequency === "monthly") return n === 1 ? "monthly" : `every ${n} months`;
+    return n === 1 ? "yearly" : `every ${n} years`;
+  }
+
+  _oftenOptions(selected, withOnce) {
+    const opts = [["w1", "Every week"], ["w2", "Every 2 weeks"], ["m1", "Monthly"], ["y1", "Yearly"]];
+    // A stream saved with an unusual interval (e.g. every 3 months) gets its own option.
+    if (selected && /^[wmy]\d+$/.test(selected) && !opts.some(([k]) => k === selected)) {
+      const [f, n] = [selected[0], selected.slice(1)];
+      opts.push([selected, `Every ${n} ${{ w: "weeks", m: "months", y: "years" }[f]}`]);
+    }
+    if (withOnce) opts.unshift(["once", "One-off"]);
+    return opts.map(([k, label]) =>
+      `<option value="${k}" ${k === selected ? "selected" : ""}>${label}</option>`).join("");
+  }
+
+  _parseOften(key) {
+    return { frequency: { w: "weekly", m: "monthly", y: "yearly" }[key[0]], interval: parseInt(key.slice(1), 10) };
+  }
+
+  _catOptions(selectedId) {
+    return [`<option value="">Uncategorized</option>`].concat(this._categories.map((c) =>
+      `<option value="${esc(c.id)}" ${selectedId === c.id ? "selected" : ""}>${esc(c.name)}</option>`
+    )).join("");
+  }
+
+  _budgetTab() {
+    const B = this._budget;
+    if (!B) return `<p class="muted">Loading budget…</p>`;
+    if (!B.configured) {
+      return this._form && this._form.kind === "budgetsetup" ? "" : this._setupForm(true);
+    }
+    const neg = (n) => (n < 0 ? "late" : "");
+    const a = B.allowance;
+    const days = B.days.map((d, i) => `<div class="day">
+        <div class="muted small">${esc(this._dayLabel(d.date, i))}</div>
+        <div class="dayamt ${neg(d.amount)}">${this._money(d.amount)}</div>
+      </div>`).join("");
+    const hero = `<div class="card hero">
+        <div class="muted">Today's budget</div>
+        <div class="heroamt ${neg(B.today)}">${this._money(B.today)}</div>
+        <div class="muted small">${this._money(a.allowance)} a day${
+          B.spent_today ? ` · spent ${this._money(B.spent_today)} today` : ""}${
+          B.income_today ? ` · ${this._money(B.income_today)} income today` : ""}</div>
+        <div class="days3">${days}</div>
+        <div class="muted small breakdown">Each day: ${this._money(a.income)} income
+          − ${this._money(a.bills)} bills − ${this._money(a.savings)} savings</div>
+        ${B.bills_without_amount ? `<div class="muted small breakdown">${B.bills_without_amount} bill${
+          B.bills_without_amount === 1 ? " has" : "s have"} no amount, so ${
+          B.bills_without_amount === 1 ? "it isn't" : "they aren't"} counted.</div>` : ""}
+      </div>`;
+    return `${hero}
+      <h2>Transactions</h2>
+      <div class="card">${this._txList()}</div>
+      <div class="section-head"><h2>Income</h2>
+        <button class="link addlink" data-newstream="income">+ Recurring income</button></div>
+      <div class="card">${this._streamList("income")}</div>
+      <h2>Savings</h2>
+      <div class="card">${this._savingsCard()}</div>
+      <p class="settings"><button class="link" id="budget-settings">Budget reset</button></p>`;
+  }
+
+  _txIcon(t) {
+    const c = this._category(t.category_id);
+    if (c) return c.icon;
+    return { expense: "mdi:cart-outline", income: "mdi:cash-plus",
+             to_savings: "mdi:piggy-bank", from_savings: "mdi:piggy-bank-outline",
+             bill_adjustment: BILL_ICON }[t.kind];
+  }
+
+  _txList() {
+    const all = this._budget.transactions || [];
+    if (!all.length) {
+      return `<p class="muted">Nothing yet. Tap <b>+ Add</b> to record spending or income.</p>`;
+    }
+    const list = all.slice(0, this._showAllTx ? RECENT_PAYMENTS_MAX : RECENT_PAYMENTS);
+    const sign = { expense: -1, income: 1, to_savings: -1, from_savings: 1 };
+    const kindLabel = { expense: "", income: "income", to_savings: "to savings",
+                        from_savings: "from savings" };
+    const rows = list.map((t) => {
+      const c = this._category(t.category_id);
+      const adj = t.kind === "bill_adjustment";
+      // A bill paid for more (or less) than its estimate: the difference is
+      // settled in the budget automatically, so it can't be deleted here.
+      const name = adj
+        ? `${t.note}: ${this._money(t.amount)} ${t.difference > 0 ? "over" : "under"} estimate`
+        : t.note;
+      const bits = adj
+        ? [t.date, `paid ${this._money(t.paid)}, estimate ${this._money(t.estimate)}`]
+        : [t.date, c ? c.name : "", kindLabel[t.kind]].filter(Boolean);
+      const amt = adj ? -t.difference : sign[t.kind] * t.amount;
+      const confirming = this._confirmTx === t.id;
+      return `<div class="row">
+        ${this._icon(this._txIcon(t), "lead")}
+        <div class="grow">
+          <div class="name">${esc(name)}</div>
+          <div class="muted small">${esc(bits.join(" · "))}</div>
+        </div>
+        <div class="amt">${amt > 0 ? "+" : ""}${this._money(amt)}</div>
+        ${t.readonly ? `<span class="iconbtn2" title="From a bill payment">${
+            this._icon("mdi:file-document-outline", "tiny muted-icon")}</span>` : confirming
+          ? `<div class="btns"><button class="secondary" data-keeptx>Keep</button>
+               <button class="danger" data-dodeltx="${esc(t.id)}">Delete</button></div>`
+          : `<button class="link iconbtn2" data-deltx="${esc(t.id)}" aria-label="Delete ${esc(t.note)}"
+               title="Delete">${this._icon("mdi:close", "tiny muted-icon")}</button>`}
+      </div>`;
+    }).join("");
+    const more = Math.min(all.length, RECENT_PAYMENTS_MAX) - RECENT_PAYMENTS;
+    const toggle = more > 0 ? `<button class="link showmore" id="toggle-tx">${
+      this._showAllTx ? "Show fewer" : `Show ${more} more`}</button>` : "";
+    return rows + toggle;
+  }
+
+  _streamList(type) {
+    const today = todayIso();
+    const list = (this._budget.recurring || []).filter((s) => s.type === type);
+    if (!list.length) {
+      return type === "income"
+        ? `<p class="muted">No recurring income yet. Add your paycheck so the daily budget knows what's coming in.</p>`
+        : `<p class="muted small">No savings plans yet.</p>`;
+    }
+    return list.map((s) => {
+      const c = this._category(s.category_id);
+      const ended = s.end_date && s.end_date < today;
+      const upcoming = s.start_date > today;
+      const when = ended ? `ended ${s.end_date}` : upcoming ? `starts ${s.start_date}`
+        : s.end_date ? `until ${s.end_date}` : "open-ended";
+      return `<div class="row ${ended ? "ended" : ""}">
+        ${this._icon(c ? c.icon : (type === "income" ? "mdi:cash-multiple" : "mdi:piggy-bank"), "lead")}
+        <div class="grow">
+          <div class="name">${esc(s.name)}</div>
+          <div class="muted small">${this._money(s.amount)} ${esc(this._often(s))} · ${esc(when)}</div>
+        </div>
+        <div class="btns"><button class="secondary" data-editstream="${esc(s.id)}">Edit</button></div>
+      </div>`;
+    }).join("");
+  }
+
+  _savingsCard() {
+    const sv = this._budget.savings;
+    return `<div class="stats two-stats">
+        <div><div class="muted small">All-time savings</div><div class="big">${this._money(sv.total)}</div></div>
+        <div><div class="muted small">Regular savings</div><div class="big">${this._money(sv.per_month)}<span class="muted small"> / month</span></div></div>
+      </div>
+      ${this._streamList("savings")}
+      <div class="actions wrapactions">
+        <button class="secondary" data-savemove="from">Take from savings</button>
+        <button class="secondary" data-savemove="to">Move to savings</button>
+        <button data-newstream="savings">Add plan</button>
+      </div>`;
+  }
+
+  _txForm(type) {
+    const income = type === "income";
+    return `<form id="txform" class="card" novalidate>
+      <div class="seg" role="radiogroup" aria-label="Type">
+        <button type="button" class="segbtn ${income ? "" : "sel"}" data-type="expense" role="radio"
+                aria-checked="${!income}">Expense</button>
+        <button type="button" class="segbtn ${income ? "sel" : ""}" data-type="income" role="radio"
+                aria-checked="${income}">Income</button>
+      </div>
+      <div class="err" data-formerr hidden></div>
+      <label>Amount
+        <input name="amount" class="bigin" type="number" step="0.01" min="0.01" inputmode="decimal"
+               placeholder="0.00" autofocus></label>
+      <label>Category
+        <span class="inline"><span id="caticon">${this._icon(BILL_ICON, "lead")}</span>
+          <select name="category">${this._catOptions(null)}</select></span></label>
+      <label>Note (optional)
+        <input name="note" type="text" autocomplete="off" placeholder="Uses the category name if empty"></label>
+      <label data-income>How often
+        <select name="often">${this._oftenOptions("once", true)}</select></label>
+      <label data-once>Date
+        <input name="date" type="date" value="${todayIso()}"></label>
+      <div class="two" data-recurring>
+        <label>Starts <input name="start" type="date" value="${todayIso()}"></label>
+        <label>Ends (optional) <input name="end" type="date"></label>
+      </div>
+      <p class="muted small" data-recurring>Leave the end date empty if it's open-ended; you can add one later.</p>
+      <div class="actions">
+        <button type="button" class="secondary" data-cancel>Cancel</button>
+        <button type="submit" id="txsubmit">Add</button>
+      </div>
+    </form>`;
+  }
+
+  _streamForm(s, type) {
+    const edit = !!s;
+    type = s ? s.type : type;
+    const income = type === "income";
+    const key = s ? `${s.frequency[0]}${s.interval}` : "w2";
+    return `<form id="streamform" class="card" novalidate>
+      <h2>${edit ? "Edit " + esc(s.name) : income ? "Add recurring income" : "Add savings plan"}</h2>
+      <div class="err" data-formerr hidden></div>
+      <label>Name
+        <input name="name" type="text" autocomplete="off" value="${esc(s ? s.name : "")}"
+               placeholder="${income ? "e.g. Paycheck" : "e.g. Emergency fund"}"></label>
+      <div class="two">
+        <label>Amount
+          <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal"
+                 value="${s ? s.amount : ""}" placeholder="0.00" ${edit ? "" : "autofocus"}></label>
+        <label>How often
+          <select name="often">${this._oftenOptions(key, false)}</select></label>
+      </div>
+      ${income ? `<label>Category
+        <span class="inline"><span id="caticon">${this._icon(
+          (this._category(s && s.category_id) || {}).icon || BILL_ICON, "lead")}</span>
+          <select name="category">${this._catOptions(s ? s.category_id : null)}</select></span></label>` : ""}
+      <div class="two">
+        <label>Starts <input name="start" type="date" value="${esc(s ? s.start_date : todayIso())}"></label>
+        <label>Ends (optional) <input name="end" type="date" value="${esc(s && s.end_date ? s.end_date : "")}"></label>
+      </div>
+      <p class="muted small">${edit
+        ? "Changes count from today on; days already past keep what they had."
+        : "Leave the end date empty if it's open-ended; you can add one later."}</p>
+      <div class="actions">
+        ${edit ? `<button type="button" class="link danger-text" id="delstream">Delete…</button>
+                  <span class="spacer"></span>` : ""}
+        <button type="button" class="secondary" data-cancel>Cancel</button>
+        <button type="submit">${edit ? "Save" : "Add"}</button>
+      </div>
+      ${edit ? `<div id="confirm" class="confirm" hidden>
+        <p>Delete <b>${esc(s.name)}</b>? It stops counting from today. To keep it until a
+          date instead, set an end date.</p>
+        <div class="actions">
+          <button type="button" class="secondary" id="keep">Keep it</button>
+          <button type="button" class="danger" id="dodelstream">Delete</button>
+        </div>
+      </div>` : ""}
+    </form>`;
+  }
+
+  _moveForm(dir) {
+    const to = dir === "to";
+    return `<form id="moveform" class="card" novalidate>
+      <h2>${to ? "Move to savings" : "Take from savings"}</h2>
+      <p class="muted small">${to ? "Takes it out of today's budget and adds it to savings."
+        : "Takes it out of savings and adds it to today's budget."}</p>
+      <div class="err" data-formerr hidden></div>
+      <label>Amount
+        <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal"
+               placeholder="0.00" autofocus></label>
+      <label>Note (optional) <input name="note" type="text" autocomplete="off"></label>
+      <label>Date <input name="date" type="date" value="${todayIso()}" max="${todayIso()}"></label>
+      <div class="actions">
+        <button type="button" class="secondary" data-cancel>Cancel</button>
+        <button type="submit">${to ? "Move to savings" : "Take from savings"}</button>
+      </div>
+    </form>`;
+  }
+
+  _setupForm(first) {
+    const B = this._budget || {};
+    return `<form id="setupform" class="card" novalidate>
+      <h2>${first ? "Set up your budget" : "Budget reset"}</h2>
+      <p class="muted small">${first
+        ? "Your daily budget is your recurring income, minus your bills and savings plans, spread over each day. What you don't spend carries over to tomorrow; overspending comes out of tomorrow."
+        : "Resetting starts the budget again from a new start date and starting amounts. Days before it no longer count; your transactions, income and savings plans are kept."}</p>
+      <div class="err" data-formerr hidden></div>
+      <label>Start date
+        <input name="start" type="date" value="${esc(first ? todayIso() : B.start_date)}" max="${todayIso()}"></label>
+      <div class="two">
+        <label>Starting spending money
+          <input name="amount" type="number" step="0.01" inputmode="decimal" value="${first ? "" : ""}"
+                 placeholder="0.00"></label>
+        <label>Savings you already have
+          <input name="savings" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+      </div>
+      <div class="actions">
+        ${first ? "" : `<button type="button" class="secondary" data-cancel>Cancel</button>`}
+        <button type="submit">${first ? "Start budget" : "Reset budget"}</button>
+      </div>
+    </form>`;
+  }
+
+  _bindTx(form) {
+    const f = form.elements;
+    let type = form.querySelector(".segbtn.sel").dataset.type;
+    const submit = form.querySelector("#txsubmit");
+    const sync = () => {
+      const recurring = type === "income" && f.often.value !== "once";
+      form.querySelectorAll("[data-income]").forEach((el) => { el.hidden = type !== "income"; });
+      form.querySelectorAll("[data-recurring]").forEach((el) => { el.hidden = !recurring; });
+      form.querySelectorAll("[data-once]").forEach((el) => { el.hidden = recurring; });
+      form.querySelectorAll(".segbtn").forEach((b) => {
+        b.classList.toggle("sel", b.dataset.type === type);
+        b.setAttribute("aria-checked", String(b.dataset.type === type));
+      });
+      submit.textContent = type === "expense" ? "Add expense"
+        : recurring ? "Add recurring income" : "Add income";
+    };
+    form.querySelectorAll(".segbtn").forEach((b) => b.addEventListener("click", () => {
+      type = b.dataset.type;
+      sync();
+    }));
+    f.often.addEventListener("change", sync);
+    f.category.addEventListener("change", () => {
+      form.querySelector("#caticon").innerHTML =
+        this._billIcon({ category_id: f.category.value || null });
+    });
+    sync();
+
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const amount = parseFloat(f.amount.value);
+      if (!(amount > 0)) return this._formError(form, "Enter an amount.");
+      const base = { amount };
+      if (f.category.value) base.category = f.category.value;
+      const note = f.note.value.trim();
+      const catName = (this._category(f.category.value) || {}).name;
+      const label = note || catName || (type === "expense" ? "Expense" : "Income");
+      if (type === "income" && f.often.value !== "once") {
+        if (!f.start.value) return this._formError(form, "Pick a start date.");
+        if (f.end.value && f.end.value < f.start.value) {
+          return this._formError(form, "The end date can't be before the start date.");
+        }
+        const data = { ...base, type: "income", ...this._parseOften(f.often.value),
+                       start_date: f.start.value };
+        if (note) data.name = note;
+        if (f.end.value) data.end_date = f.end.value;
+        return this._submit(form, "add_recurring", data, (r) =>
+          `Added ${r.recurring.name}: ${this._money(amount)} ${this._often(r.recurring)}.`);
+      }
+      const data = { ...base, date: f.date.value || todayIso() };
+      if (note) data.note = note;
+      this._submit(form, type === "expense" ? "add_expense" : "add_income", data, (r) =>
+        `Added ${label} ${type === "expense" ? "−" : "+"}${this._money(amount)}. ` +
+        `Today's budget: ${this._money(r.today)}.`);
+    });
+  }
+
+  _bindStream(form, s, type) {
+    const f = form.elements;
+    if (f.category) {
+      f.category.addEventListener("change", () => {
+        form.querySelector("#caticon").innerHTML =
+          this._billIcon({ category_id: f.category.value || null });
+      });
+    }
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const amount = parseFloat(f.amount.value);
+      if (!(amount > 0)) return this._formError(form, "Enter an amount.");
+      if (!f.start.value) return this._formError(form, "Pick a start date.");
+      if (f.end.value && f.end.value < f.start.value) {
+        return this._formError(form, "The end date can't be before the start date.");
+      }
+      const name = f.name.value.trim();
+      const data = { amount, ...this._parseOften(f.often.value), start_date: f.start.value,
+                     end_date: f.end.value || null };
+      const category = f.category ? (f.category.value || null) : null;
+      if (!s) {
+        const add = { ...data, type };
+        if (!add.end_date) delete add.end_date;
+        if (name) add.name = name;
+        if (category) add.category = category;
+        return this._submit(form, "add_recurring", add, (r) => `Added ${r.recurring.name}.`);
+      }
+      const before = { amount: s.amount, frequency: s.frequency, interval: s.interval,
+                       start_date: s.start_date, end_date: s.end_date || null };
+      const changes = {};
+      for (const [k, v] of Object.entries(data)) if (v !== before[k]) changes[k] = v;
+      if (name && name !== s.name) changes.name = name;
+      if (f.category && category !== (s.category_id || null)) changes.category = category;
+      if (!Object.keys(changes).length) return this._close();
+      this._submit(form, "update_recurring", { recurring: s.id, ...changes },
+        (r) => `Saved ${r.recurring.name}.`);
+    });
+    if (s) {
+      this._bindConfirm(form, "delstream", "dodelstream", async () => {
+        await this._call("delete_recurring", { recurring: s.id });
+        this._flash(`Deleted ${s.name}.`);
+        this._close(false);
+        await this._refresh();
+      });
+    }
+  }
+
+  _bindMove(form, dir) {
+    const f = form.elements;
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const amount = parseFloat(f.amount.value);
+      if (!(amount > 0)) return this._formError(form, "Enter an amount.");
+      const data = { amount, date: f.date.value || todayIso() };
+      if (f.note.value.trim()) data.note = f.note.value.trim();
+      this._submit(form, dir === "to" ? "move_to_savings" : "take_from_savings", data, (r) =>
+        `${dir === "to" ? "Moved" : "Took"} ${this._money(amount)} ${dir === "to" ? "to" : "from"} savings. ` +
+        `Today's budget: ${this._money(r.today)}.`);
+    });
+  }
+
+  _bindSetup(form) {
+    const f = form.elements;
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      if (!f.start.value) return this._formError(form, "Pick a start date.");
+      const amount = f.amount.value === "" ? 0 : parseFloat(f.amount.value);
+      const savings = f.savings.value === "" ? 0 : parseFloat(f.savings.value);
+      if (Number.isNaN(amount)) return this._formError(form, "Starting spending money isn't a number.");
+      if (!(savings >= 0)) return this._formError(form, "Savings can't be negative.");
+      this._submit(form, "budget_setup",
+        { start_date: f.start.value, starting_amount: amount, starting_savings: savings },
+        () => (this._budget && this._budget.configured
+          ? `Budget reset from ${f.start.value}.`
+          : "Budget started. Add your recurring income next."));
+    });
+  }
+
   // ---------- forms ----------
 
   _payForm(b) {
@@ -542,6 +1023,7 @@ class BillsPanel extends HTMLElement {
       <label class="check" id="estrow" hidden>
         <input name="update_amount" type="checkbox">
         <span>Use this as the new estimate <span class="muted">(${esc(current)})</span></span></label>
+      <p class="muted small" id="budgetdiff" hidden></p>
       <label>Date paid
         <input name="paid_date" type="date" value="${todayIso()}" required></label>
       <label>Confirmation number (optional)
@@ -598,7 +1080,7 @@ class BillsPanel extends HTMLElement {
           <select name="category">${catOpts}</select>
         </span></label>
       ${this._categories.length ? "" : `<p class="muted small hint">Make categories with the
-        <b>Categories</b> button at the top.</p>`}
+        <b>Categories</b> tab.</p>`}
       <div class="two">
         <label>Amount
           <input name="amount" type="number" step="0.01" min="0" inputmode="decimal"
@@ -606,6 +1088,9 @@ class BillsPanel extends HTMLElement {
         <label>${edit ? "Next due" : "First due date"}
           <input name="due_date" type="date" required value="${esc(v.next_due)}"></label>
       </div>
+      <p class="note-box small" id="noamount" hidden>Without an amount, this bill isn't counted
+        in your budget. Add an estimate here, tick <b>Use this as the new estimate</b> when
+        you pay it, or record what you pay as an expense in the Budget tab.</p>
       <div class="two">
         <label>Repeats
           <select name="frequency">${opts}</select></label>
@@ -660,15 +1145,11 @@ class BillsPanel extends HTMLElement {
             <button class="secondary" data-editcat="${esc(c.id)}">Edit</button>
           </div>
         </div>`).join("")
-      : `<p class="muted">No categories yet. Add one, then pick it when you add or edit a bill.</p>`;
-    return `<div class="card">
-      <h2>Categories</h2>
-      ${rows}
-      <div class="actions">
-        <button type="button" class="secondary" data-cancel>Done</button>
-        <button type="button" id="newcat">New category</button>
-      </div>
-    </div>`;
+      : `<p class="muted">No categories yet. Tap <b>+ New</b> to add one, then pick it for
+          bills, expenses and income.</p>`;
+    return `<p class="muted small">Shared by bills and the budget. Each category's icon
+        shows next to its bills and transactions.</p>
+      <div class="card">${rows}</div>`;
   }
 
   _categoryForm(c) {
@@ -765,9 +1246,39 @@ class BillsPanel extends HTMLElement {
     else if (k === "pay" && b) formHtml = this._payForm(b);
     else if (k === "edit" && b) formHtml = this._billForm(b);
     else if (k === "add") formHtml = this._billForm(null);
-    else if (k === "categories") formHtml = this._categoriesView();
     else if (k === "category") formHtml = this._categoryForm(b);
     else if (k === "history") formHtml = this._historyView();
+    else if (k === "tx") formHtml = this._txForm(this._form.type);
+    else if (k === "stream") {
+      const s = id && this._budget ? (this._budget.recurring || []).find((x) => x.id === id) : null;
+      b = s;
+      formHtml = this._streamForm(s, this._form.type);
+    } else if (k === "savemove") formHtml = this._moveForm(this._form.dir);
+    else if (k === "budgetsetup") formHtml = this._setupForm(!(this._budget && this._budget.configured));
+    const budgetTab = this._tab === "budget";
+    const configured = this._budget && this._budget.configured;
+    const catTab = this._tab === "categories";
+    const tabBtn = (t, label) => `<button class="tab ${this._tab === t ? "sel" : ""}" role="tab"
+        aria-selected="${this._tab === t}" data-tab="${t}">${label}</button>`;
+    let actions = "";
+    if (budgetTab && configured && k !== "tx") {
+      actions = `<button id="addtx" class="addbtn">${this._icon("mdi:plus", "onprimary")} Add</button>`;
+    } else if (catTab && k !== "category") {
+      actions = `<button id="newcat" class="addbtn">${this._icon("mdi:plus", "onprimary")} New</button>`;
+    } else if (!budgetTab && !catTab && k !== "add") {
+      actions = `<button id="add" class="addbtn">${this._icon("mdi:plus", "onprimary")} Add bill</button>`;
+    }
+    let body;
+    if (budgetTab) body = this._budgetTab();
+    else if (catTab) body = this._categoriesView();
+    else {
+      body = `<h2>Upcoming</h2>
+        <div class="card">${this._billsList()}</div>
+        ${this._costs_html()}
+        <h2>Recent payments</h2>
+        <div class="card">${this._paymentsList()}</div>
+        ${this._retiredSection()}`;
+    }
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -908,27 +1419,57 @@ class BillsPanel extends HTMLElement {
         .ok { background: var(--success-color, #2e7d32); color: #fff; transition: opacity .4s; }
         .ok.hide { opacity: 0; }
         .err { background: var(--error-color); color: #fff; }
+        h1 { margin: 8px 0 12px; }
+        header { margin-bottom: 8px; flex-wrap: wrap; }
+        .tabs { display: inline-flex; border: 1px solid var(--divider-color); border-radius: 10px;
+                padding: 3px; gap: 2px; }
+        .tab { background: transparent; color: var(--primary-text-color); padding: 7px 18px;
+               border-radius: 7px; font-weight: 500; }
+        .tab.sel { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        .addbtn { display: flex; align-items: center; gap: 4px; font-weight: 500; padding: 8px 14px 8px 10px; }
+        ha-icon.onprimary { --mdc-icon-size: 20px; color: var(--text-primary-color, #fff); }
+        ha-icon.muted-icon { color: var(--secondary-text-color); }
+        .hero { text-align: center; padding: 20px 16px; }
+        .heroamt { font-size: 44px; font-weight: 500; line-height: 1.15; margin: 4px 0 6px; }
+        .days3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0 10px; }
+        .day { border: 1px solid var(--divider-color); border-radius: 10px; padding: 8px 4px; }
+        .dayamt { font-size: 17px; font-weight: 500; white-space: nowrap; }
+        .breakdown { margin-top: 4px; }
+        .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px;
+               border: 1px solid var(--divider-color); border-radius: 10px; margin-bottom: 8px; }
+        .segbtn { background: transparent; color: var(--primary-text-color); font-weight: 500; padding: 9px; }
+        .segbtn.sel { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        input.bigin { font-size: 24px; padding: 10px 12px; }
+        .addlink { color: var(--primary-color); }
+        .iconbtn2 { padding: 6px; display: flex; }
+        .two-stats { grid-template-columns: 1fr 1fr; margin-bottom: 8px; }
+        .wrapactions { flex-wrap: wrap; }
+        .row.ended { opacity: .6; }
+        .settings { text-align: center; margin: 8px 0 24px; }
+        .note-box { margin: 0 0 4px; padding: 8px 10px; border-radius: 8px;
+                    border: 1px solid var(--divider-color); color: var(--secondary-text-color); }
+        .note-box b { color: var(--primary-text-color); font-weight: 500; }
+        .settings .link { color: var(--secondary-text-color); text-decoration: underline; }
         @media (max-width: 420px) {
+          .heroamt { font-size: 38px; }
+          .dayamt { font-size: 15px; }
           .two { grid-template-columns: 1fr; }
           .big { font-size: 17px; }
         }
       </style>
       <div class="wrap">
+        <h1>Bills &amp; Budget</h1>
         <header>
-          <h1>Bills</h1>
-          ${k === "categories" || k === "category" ? "" :
-            `<button class="secondary" id="cats">Categories</button>`}
-          ${k === "add" ? "" : `<button id="add">Add bill</button>`}
+          <div class="tabs" role="tablist">
+            ${tabBtn("bills", "Bills")}${tabBtn("budget", "Budget")}${tabBtn("categories", "Categories")}
+          </div>
+          <span class="spacer"></span>
+          ${actions}
         </header>
         ${this._error ? `<div class="err">${esc(this._error)}</div>` : ""}
         ${this._msg ? `<div class="ok">${esc(this._msg)}</div>` : ""}
         ${formHtml}
-        <h2>Upcoming</h2>
-        <div class="card">${this._billsList()}</div>
-        ${this._costs_html()}
-        <h2>Recent payments</h2>
-        <div class="card">${this._paymentsList()}</div>
-        ${this._retiredSection()}
+        ${body}
       </div>`;
     this._bind(k, b);
   }
@@ -936,8 +1477,34 @@ class BillsPanel extends HTMLElement {
   _bind(kind, item) {
     const root = this.shadowRoot;
     const on = (id, fn) => { const el = root.getElementById(id); if (el) el.addEventListener("click", fn); };
+    const each = (attr, fn) => root.querySelectorAll(`[data-${attr}]`).forEach((btn) =>
+      btn.addEventListener("click", () => fn(btn.dataset[attr])));
     on("add", () => this._open("add"));
-    on("cats", () => this._open("categories"));
+    each("tab", (t) => this._setTab(t));
+    on("addtx", () => this._open("tx", null, { type: "expense" }));
+    on("budget-settings", () => this._open("budgetsetup"));
+    on("toggle-tx", () => { this._showAllTx = !this._showAllTx; this._render(); });
+    each("newstream", (t) => this._open("stream", null, { type: t }));
+    each("editstream", (id) => this._open("stream", id));
+    each("savemove", (d) => this._open("savemove", null, { dir: d }));
+    each("deltx", (id) => { this._confirmTx = id; this._render(); });
+    root.querySelectorAll("[data-keeptx]").forEach((b) =>
+      b.addEventListener("click", () => { this._confirmTx = null; this._render(); }));
+    each("dodeltx", async (id) => {
+      try {
+        await this._call("delete_transaction", { transaction: id });
+        this._flash("Transaction deleted.");
+      } catch (e) {
+        this._error = e.message || String(e);
+      }
+      this._confirmTx = null;
+      await this._refresh();
+    });
+    if (kind === "tx") this._bindTx(root.getElementById("txform"));
+    if (kind === "stream") this._bindStream(root.getElementById("streamform"), item, this._form.type);
+    if (kind === "savemove") this._bindMove(root.getElementById("moveform"), this._form.dir);
+    const setup = root.getElementById("setupform");
+    if (setup) this._bindSetup(setup);
     on("newcat", () => this._open("category"));
     on("toggle-payments", () => {
       this._showMorePayments = !this._showMorePayments;
@@ -951,8 +1518,6 @@ class BillsPanel extends HTMLElement {
       this._showRetired = !this._showRetired;
       this._render();
     });
-    const each = (attr, fn) => root.querySelectorAll(`[data-${attr}]`).forEach((btn) =>
-      btn.addEventListener("click", () => fn(btn.dataset[attr])));
     each("pay", (id) => this._open("pay", id));
     each("edit", (id) => this._open("edit", id));
     each("restore", (id) => this._open("restore", id));
@@ -1073,6 +1638,17 @@ class BillsPanel extends HTMLElement {
       const v = f.amount.value;
       estRow.hidden = v === "" || parseFloat(v) === b.amount;
       if (estRow.hidden) f.update_amount.checked = false;
+      // Recurring bills with an estimate settle the difference in the budget.
+      const diffEl = form.querySelector("#budgetdiff");
+      const diff = Math.round((parseFloat(v) - b.amount) * 100) / 100;
+      const counts = this._budget && this._budget.configured && b.frequency !== "once"
+        && b.amount !== null && b.amount !== undefined && v !== "" && diff;
+      diffEl.hidden = !counts;
+      if (counts) {
+        diffEl.textContent = diff > 0
+          ? `${this._money(diff)} over the estimate: it comes out of the budget on the day paid.`
+          : `${this._money(-diff)} under the estimate: it goes back into the budget on the day paid.`;
+      }
     };
     f.amount.addEventListener("input", syncEst);
     syncEst();
@@ -1093,6 +1669,15 @@ class BillsPanel extends HTMLElement {
   _bindBill(form, b) {
     const f = form.elements;
     const unit = form.querySelector("#unit");
+    // One-time bills come out of the budget when paid, so the note is only for
+    // repeating bills without an amount.
+    const noAmount = form.querySelector("#noamount");
+    const syncNote = () => {
+      noAmount.hidden = f.amount.value !== "" || f.frequency.value === "once";
+    };
+    f.amount.addEventListener("input", syncNote);
+    f.frequency.addEventListener("change", syncNote);
+    syncNote();
     const syncRepeat = () => {
       const freq = f.frequency.value;
       form.querySelectorAll("[data-repeat]").forEach((el) => { el.hidden = freq === "once"; });
@@ -1154,7 +1739,7 @@ class BillsPanel extends HTMLElement {
   _bindCategory(form, c) {
     const f = form.elements;
     const preview = form.querySelector("#iconpreview");
-    const back = { kind: "categories", id: null };
+    const back = null;  // back to the Categories tab's list
     const sync = () => {
       const v = f.icon.value.trim();
       preview.innerHTML = this._icon(ICON_RE.test(v) ? v : DEFAULT_CATEGORY_ICON, "lead");
@@ -1164,7 +1749,7 @@ class BillsPanel extends HTMLElement {
     f.icon.addEventListener("input", sync);
     form.querySelectorAll("[data-icon]").forEach((btn) =>
       btn.addEventListener("click", () => { f.icon.value = btn.dataset.icon; sync(); }));
-    form.querySelector("#catback").addEventListener("click", () => this._open("categories"));
+    form.querySelector("#catback").addEventListener("click", () => this._close());
 
     form.addEventListener("submit", (ev) => {
       ev.preventDefault();
@@ -1181,7 +1766,7 @@ class BillsPanel extends HTMLElement {
       const changes = {};
       if (name !== c.name) changes.name = name;
       if (icon !== c.icon) changes.icon = icon;
-      if (!Object.keys(changes).length) return this._open("categories");
+      if (!Object.keys(changes).length) return this._close();
       this._submit(form, "update_category", { category: c.id, ...changes },
         () => `Saved category ${name}.`, back);
     });

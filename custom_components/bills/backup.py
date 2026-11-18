@@ -44,7 +44,8 @@ def check_name(name: str) -> str:
 
 
 def build(bills: dict, payments: list, categories: dict, meta: dict,
-          created: datetime, version: int) -> dict[str, Any]:
+          created: datetime, version: int,
+          budget: dict | None = None) -> dict[str, Any]:
     return {
         "format": "ha-bills-backup",
         "version": version,
@@ -52,6 +53,7 @@ def build(bills: dict, payments: list, categories: dict, meta: dict,
         "bills": bills,
         "payments": payments,
         "categories": categories,
+        "budget": budget or {},
         "meta": meta,
     }
 
@@ -80,6 +82,13 @@ def validate(data: Any) -> dict[str, Any]:
     for key, c in categories.items():
         if not isinstance(c, dict) or c.get("id") != key or not c.get("name"):
             raise ValueError(f"Category '{key}' isn't valid")
+    # Backups made before the budget existed have none.
+    budget = data.get("budget", {})
+    if not isinstance(budget, dict):
+        raise ValueError("Backup's budget isn't valid")
+    if not isinstance(budget.get("transactions", []), list) or \
+            not isinstance(budget.get("recurring", {}), dict):
+        raise ValueError("Backup's budget isn't valid")
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
     return {"bills": bills, "payments": payments, "categories": categories,
-            "meta": meta}
+            "budget": budget, "meta": meta}

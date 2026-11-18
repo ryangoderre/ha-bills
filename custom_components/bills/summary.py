@@ -159,8 +159,9 @@ _SYMBOLS = {"USD": "$", "CAD": "$", "AUD": "$", "NZD": "$", "EUR": "€",
 
 def format_money(amount: float, currency: str | None = None) -> str:
     sym = _SYMBOLS.get(currency or "USD")
-    num = f"{amount:,.2f}"
-    return f"{sym}{num}" if sym else f"{num} {currency}"
+    num = f"{abs(amount):,.2f}"
+    sign = "-" if round(amount, 2) < 0 else ""
+    return f"{sign}{sym}{num}" if sym else f"{sign}{num} {currency}"
 
 
 UNCATEGORIZED = {"id": None, "name": "Uncategorized", "icon": "mdi:shape-outline"}

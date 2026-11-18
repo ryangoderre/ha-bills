@@ -222,3 +222,165 @@ bill_history:
     bill:
       required: true
       selector: {text: }
+
+budget_setup:
+  name: Set up budget
+  description: >-
+    Start (or restart) the daily budget. Days before the start date don't
+    count; transactions are kept.
+  fields:
+    start_date:
+      description: Defaults to today. Can't be in the future.
+      selector: {date: }
+    starting_amount:
+      description: Spending money you're starting with (can be negative).
+      default: 0
+      selector:
+        number: {step: 0.01, mode: box}
+    starting_savings:
+      description: Savings you already have.
+      default: 0
+      selector:
+        number: {min: 0, step: 0.01, mode: box}
+
+add_expense:
+  name: Add expense
+  description: Spend from the budget. Returns the transaction and today's budget.
+  fields:
+    amount:
+      required: true
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    category:
+      description: Category name or id.
+      selector: {text: }
+    note:
+      description: Defaults to the category name.
+      selector: {text: }
+    date:
+      description: Defaults to today.
+      selector: {date: }
+
+add_income:
+  name: Add one-off income
+  description: Add money to the budget on a day (today by default).
+  fields:
+    amount:
+      required: true
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    category:
+      selector: {text: }
+    note:
+      selector: {text: }
+    date:
+      selector: {date: }
+
+move_to_savings:
+  name: Move to savings
+  description: Take an amount from the budget and add it to savings.
+  fields:
+    amount:
+      required: true
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    note:
+      selector: {text: }
+    date:
+      selector: {date: }
+
+take_from_savings:
+  name: Take from savings
+  description: Take an amount out of savings and add it to the budget.
+  fields:
+    amount:
+      required: true
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    note:
+      selector: {text: }
+    date:
+      selector: {date: }
+
+delete_transaction:
+  name: Delete transaction
+  description: Remove an expense, income or savings move.
+  fields:
+    transaction:
+      required: true
+      selector: {text: }
+
+add_recurring:
+  name: Add recurring income or savings
+  description: >-
+    Recurring income adds to every day's budget; a savings plan comes out of
+    it. Every 2 weeks is frequency weekly with interval 2.
+  fields:
+    type:
+      required: true
+      selector:
+        select:
+          options: [income, savings]
+    amount:
+      required: true
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    frequency:
+      required: true
+      default: weekly
+      selector:
+        select:
+          options: [weekly, monthly, yearly]
+    interval:
+      default: 1
+      selector:
+        number: {min: 1, max: 52, mode: box}
+    name:
+      selector: {text: }
+    category:
+      selector: {text: }
+    start_date:
+      selector: {date: }
+    end_date:
+      description: Leave empty for open-ended.
+      selector: {date: }
+
+update_recurring:
+  name: Update recurring income or savings
+  description: Change it from today on. Set end_date to null to make it open-ended.
+  fields:
+    recurring:
+      required: true
+      selector: {text: }
+    name:
+      selector: {text: }
+    amount:
+      selector:
+        number: {min: 0.01, step: 0.01, mode: box}
+    frequency:
+      selector:
+        select:
+          options: [weekly, monthly, yearly]
+    interval:
+      selector:
+        number: {min: 1, max: 52, mode: box}
+    category:
+      selector: {text: }
+    start_date:
+      selector: {date: }
+    end_date:
+      selector: {date: }
+
+delete_recurring:
+  name: Delete recurring income or savings
+  description: Stop it from today on. Days already past keep what it added.
+  fields:
+    recurring:
+      required: true
+      selector: {text: }
+
+budget_summary:
+  name: Budget summary
+  description: >-
+    Today's budget, the next two days, today's allowance, savings totals,
+    recurring income and savings plans, and recent transactions.

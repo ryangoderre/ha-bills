@@ -77,3 +77,13 @@ def test_bad_category_rejected():
     with pytest.raises(ValueError):
         backup.validate({"bills": {}, "payments": [],
                          "categories": {"c1": {"id": "other", "name": "X"}}})
+
+
+def test_budget_round_trips_and_old_backups_have_none():
+    bud = {"start_date": "2026-11-18", "starting_amount": 0, "starting_savings": 0,
+           "recurring": {}, "transactions": [], "ledger": {}}
+    data = backup.build({"b1": BILL}, [], {}, {}, datetime(2026, 11, 18), 1, bud)
+    assert backup.validate(data)["budget"]["start_date"] == "2026-11-18"
+    assert backup.validate({"bills": {}, "payments": []})["budget"] == {}
+    with pytest.raises(ValueError):
+        backup.validate({"bills": {}, "payments": [], "budget": {"transactions": {}}})

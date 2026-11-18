@@ -25,7 +25,9 @@ class BillsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.data = self._compute()
 
     def _compute(self) -> dict[str, Any]:
-        return compute_summary(self.store.list_bills(), dt_util.now().date())
+        data = compute_summary(self.store.list_bills(), dt_util.now().date())
+        data["budget"] = self.store.budget_summary()
+        return data
 
     async def _async_update_data(self) -> dict[str, Any]:
         return self._compute()

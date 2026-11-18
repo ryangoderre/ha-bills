@@ -14,7 +14,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from . import backup, schedule
+from . import backup, budget as budget_logic, schedule
 from .const import STORAGE_KEY, STORAGE_VERSION
 
 UPDATABLE = ("name", "amount", "notes", "biller_url", "autopay",
@@ -41,6 +41,7 @@ class BillStore:
         self.bills: dict[str, dict[str, Any]] = {}
         self.payments: list[dict[str, Any]] = []
         self.categories: dict[str, dict[str, Any]] = {}
+        self.budget: dict[str, Any] = budget_logic.new_budget()
         # Bookkeeping that isn't bill data, e.g. last_reminder_date.
         self.meta: dict[str, Any] = {}
         self._listeners: list[Callable[[], None]] = []
@@ -52,6 +53,7 @@ class BillStore:
             self.bills = data.get("bills", {})
             self.payments = data.get("payments", [])
             self.categories = data.get("categories", {})
+            self.budget = {**budget_logic.new_budget(), **data.get("budget", {})}
             self.meta = data.get("meta", {})
 
     def async_add_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
@@ -61,7 +63,8 @@ class BillStore:
     async def _async_save(self, notify: bool = True) -> None:
         await self._store.async_save(
             {"bills": self.bills, "payments": self.payments,
-             "categories": self.categories, "meta": self.meta}
+             "categories": self.categories, "budget": self.budget,
+             "meta": self.meta}
         )
         if notify:
             for cb in list(self._listeners):
@@ -76,7 +79,7 @@ class BillStore:
     async def async_write_backup(self, name: str) -> Path:
         path = self.backup_dir / backup.check_name(name)
         data = backup.build(self.bills, self.payments, self.categories,
-                            self.meta, dt_util.now(), STORAGE_VERSION)
+                            self.meta, dt_util.now(), STORAGE_VERSION, self.budget)
         # Serialise now, on the event loop, so the copy can't change mid-write.
         data = json.loads(json.dumps(data))
         await self.hass.async_add_executor_job(_write_json, path, data)
@@ -135,12 +138,151 @@ class BillStore:
         await self.async_write_backup(safety)
         self.bills, self.payments = data["bills"], data["payments"]
         self.categories = data["categories"]
+        self.budget = {**budget_logic.new_budget(), **data["budget"]}
         # Keep today's reminder bookkeeping so a restore doesn't resend them.
         self.meta = {**data["meta"], **self.meta}
         await self._async_save()
         return {"restored_from": name, "safety_backup": safety,
                 "bills": len(self.bills), "payments": len(self.payments),
                 "categories": len(self.categories)}
+
+    # ---------- budget ----------
+
+    def _today(self) -> date:
+        return dt_util.now().date()
+
+    def _require_budget(self) -> None:
+        if not self.budget["start_date"]:
+            raise ServiceValidationError(
+                "Set up the budget first (start date and starting amount)")
+
+    async def async_freeze_budget(self) -> int:
+        """Lock in the allowance of past days so later changes only affect
+        today onward. Runs at startup and midnight."""
+        new = budget_logic.days_to_freeze(
+            self.budget, self.list_bills(include_retired=True), self._today())
+        if new:
+            self.budget["ledger"].update(new)
+            await self._async_save(notify=False)
+        return len(new)
+
+    async def async_budget_setup(self, start: date | None, amount: float,
+                                 savings: float) -> dict[str, Any]:
+        start = start or self._today()
+        if start > self._today():
+            raise ServiceValidationError("The budget can't start in the future")
+        # Nothing is frozen here: past days lock in at midnight, so income and
+        # savings plans added right after setup still count from the start date.
+        self.budget.update(start_date=start.isoformat(), starting_amount=amount,
+                           starting_savings=savings, ledger={})
+        await self._async_save()
+        return self.budget
+
+    def _default_note(self, kind: str, category_id: str | None) -> str:
+        if category_id:
+            return self.categories[category_id]["name"]
+        return {"expense": "Expense", "income": "Income", "to_savings": "To savings",
+                "from_savings": "From savings"}[kind]
+
+    async def async_add_transaction(self, kind: str, amount: float,
+                                    category: str | None = None,
+                                    note: str | None = None,
+                                    day: date | None = None) -> dict[str, Any]:
+        self._require_budget()
+        category_id = self._category_id(category)
+        tx = {
+            "id": uuid4().hex,
+            "date": (day or self._today()).isoformat(),
+            "kind": kind,
+            "amount": amount,
+            "category_id": category_id,
+            "note": note or self._default_note(kind, category_id),
+            "created": dt_util.now().isoformat(),
+        }
+        self.budget["transactions"].append(tx)
+        await self._async_save()
+        return tx
+
+    async def async_delete_transaction(self, tx_id: str) -> dict[str, Any]:
+        for i, t in enumerate(self.budget["transactions"]):
+            if t["id"] == tx_id:
+                del self.budget["transactions"][i]
+                await self._async_save()
+                return t
+        raise ServiceValidationError(f"No transaction with id '{tx_id}'")
+
+    def find_stream(self, ref: str) -> dict[str, Any]:
+        streams = self.budget["recurring"]
+        if ref in streams:
+            return streams[ref]
+        for s in streams.values():
+            if s["name"].lower() == ref.lower():
+                return s
+        raise ServiceValidationError(f"No recurring income or savings plan matching '{ref}'")
+
+    def _check_stream_dates(self, start: str, end: str | None) -> None:
+        if end and end < start:
+            raise ServiceValidationError("The end date can't be before the start date")
+
+    async def async_add_stream(self, data: dict[str, Any]) -> dict[str, Any]:
+        self._require_budget()
+        category_id = self._category_id(data.get("category"))
+        start = (data.get("start_date") or self._today()).isoformat()
+        end = data["end_date"].isoformat() if data.get("end_date") else None
+        self._check_stream_dates(start, end)
+        default_name = (self.categories[category_id]["name"] if category_id
+                        else "Income" if data["type"] == "income" else "Savings")
+        stream = {
+            "id": uuid4().hex, "type": data["type"],
+            "name": data.get("name") or default_name,
+            "amount": data["amount"], "frequency": data["frequency"],
+            "interval": data["interval"], "start_date": start, "end_date": end,
+            "category_id": category_id,
+        }
+        self.budget["recurring"][stream["id"]] = stream
+        await self._async_save()
+        return stream
+
+    async def async_update_stream(self, ref: str, changes: dict[str, Any]):
+        stream = self.find_stream(ref)
+        new = dict(stream)
+        if "category" in changes:
+            new["category_id"] = self._category_id(changes["category"])
+        for key in ("name", "amount", "frequency", "interval"):
+            if key in changes:
+                new[key] = changes[key]
+        if "start_date" in changes:
+            new["start_date"] = changes["start_date"].isoformat()
+        if "end_date" in changes:
+            new["end_date"] = changes["end_date"].isoformat() if changes["end_date"] else None
+        self._check_stream_dates(new["start_date"], new["end_date"])
+        stream.update(new)
+        await self._async_save()
+        return stream
+
+    async def async_delete_stream(self, ref: str) -> dict[str, Any]:
+        stream = self.budget["recurring"].pop(self.find_stream(ref)["id"])
+        await self._async_save()
+        return stream
+
+    def budget_summary(self) -> dict[str, Any]:
+        bills = self.list_bills(include_retired=True)
+        out = budget_logic.compute(self.budget, bills, self.payments, self._today())
+        out["recurring"] = sorted(
+            self.budget["recurring"].values(),
+            key=lambda s: (s["type"], s["name"].lower()))
+        # Bill payment differences show in the transaction list (read-only).
+        adjustments = [{
+            "id": f"adj-{a['payment_id']}", "date": a["date"], "kind": "bill_adjustment",
+            "amount": abs(a["difference"]), "difference": a["difference"],
+            "estimate": a["estimate"], "paid": a["paid"], "bill_id": a["bill_id"],
+            "category_id": a["category_id"], "note": a["bill_name"],
+            "created": a["date"], "readonly": True,
+        } for a in out.get("bill_adjustments", [])]
+        out["transactions"] = sorted(
+            self.budget["transactions"] + adjustments,
+            key=lambda t: (t["date"], t["created"]), reverse=True)[:50]
+        return out
 
     # ---------- categories ----------
 
@@ -318,6 +460,9 @@ class BillStore:
             "amount_paid": amount if amount is not None else bill["amount"],
             "confirmation": confirmation,
             "note": note,
+            # The estimate this payment is measured against in the budget,
+            # saved now so later estimate changes never alter it.
+            "estimate": bill["amount"],
         }
         self.payments.append(payment)
         if update_amount and amount is not None:

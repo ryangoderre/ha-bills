@@ -302,3 +302,12 @@ def test_history_year_over_year():
 def test_history_ignores_payments_without_amount():
     h = bill_history([_p("2026-10-10", None), _p("2026-11-10", 40)], TODAY)
     assert h["count"] == 1 and h["previous"] is None
+
+
+from custom_components.bills.summary import format_money
+
+
+def test_format_money_negative():
+    assert format_money(-50, "USD") == "-$50.00"
+    assert format_money(-0.001, "USD") == "$0.00"
+    assert format_money(-1234.5, "SEK") == "-1,234.50 SEK"

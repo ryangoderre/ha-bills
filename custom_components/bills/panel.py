@@ -31,7 +31,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         webcomponent_name="bills-panel",
         frontend_url_path=PANEL_PATH,
         module_url=f"{URL_BASE}/bills-panel.js?v={mtime}",
-        sidebar_title="Bills",
+        sidebar_title="Bills & Budget",
         sidebar_icon="mdi:cash-multiple",
         require_admin=False,
         config={},
