@@ -1,0 +1,104 @@
+add_bill:
+  name: Add bill
+  description: Add a new bill to track.
+  fields:
+    name:
+      required: true
+      example: Rent
+      selector: {text: }
+    due_date:
+      required: true
+      selector: {date: }
+    frequency:
+      required: true
+      default: monthly
+      selector:
+        select:
+          options: [once, weekly, monthly, yearly]
+    interval:
+      default: 1
+      selector:
+        number: {min: 1, max: 60, mode: box}
+    amount:
+      selector:
+        number: {min: 0, step: 0.01, mode: box}
+    end_date:
+      selector: {date: }
+    autopay:
+      selector: {boolean: }
+    remind_days_before:
+      default: 3
+      selector:
+        number: {min: 0, max: 60, mode: box}
+    biller_url:
+      selector: {text: }
+    notes:
+      selector: {text: }
+    tags:
+      selector:
+        text: {multiple: true}
+
+update_bill:
+  name: Update bill
+  description: Change details of an existing bill (not its schedule).
+  fields:
+    bill:
+      required: true
+      selector: {text: }
+    name:
+      selector: {text: }
+    amount:
+      selector:
+        number: {min: 0, step: 0.01, mode: box}
+    autopay:
+      selector: {boolean: }
+    remind_days_before:
+      selector:
+        number: {min: 0, max: 60, mode: box}
+    biller_url:
+      selector: {text: }
+    notes:
+      selector: {text: }
+    tags:
+      selector:
+        text: {multiple: true}
+
+retire_bill:
+  name: Retire bill
+  description: Stop tracking a bill but keep its payment history.
+  fields:
+    bill:
+      required: true
+      selector: {text: }
+
+mark_paid:
+  name: Mark paid
+  description: Record a payment for a bill's current due date and advance it.
+  fields:
+    bill:
+      required: true
+      selector: {text: }
+    amount:
+      selector:
+        number: {min: 0, step: 0.01, mode: box}
+    paid_date:
+      selector: {date: }
+    confirmation:
+      selector: {text: }
+    note:
+      selector: {text: }
+
+list_bills:
+  name: List bills
+  description: Return all bills.
+  fields:
+    include_retired:
+      default: false
+      selector: {boolean: }
+
+list_payments:
+  name: List payments
+  description: Return payment history, newest first.
+  fields:
+    bill:
+      selector: {text: }

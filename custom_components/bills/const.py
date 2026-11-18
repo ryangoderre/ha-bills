@@ -1,1 +1,3 @@
 DOMAIN = "bills"
+STORAGE_KEY = f"{DOMAIN}.data"
+STORAGE_VERSION = 1
