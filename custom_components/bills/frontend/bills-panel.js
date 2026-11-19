@@ -16,7 +16,7 @@ const UNITS = { weekly: "week", monthly: "month", yearly: "year" };
 const NEW_BILL = {
   name: "", amount: null, next_due: null, frequency: "monthly", interval: 1,
   end_date: null, remind_days_before: 3, autopay: false, biller_url: null, notes: null,
-  category_id: null,
+  category_id: null, in_budget: true,
 };
 
 const UPCOMING_LIMIT = 3;
@@ -257,7 +257,8 @@ class BillsPanel extends HTMLElement {
       return `<div class="row">
         ${this._billIcon(b)}
         <button class="rowlink grow" data-history="${esc(b.id)}" title="Payment history">
-          <div class="name">${esc(b.name)}${b.autopay ? ' <span class="tag">autopay</span>' : ""}</div>
+          <div class="name">${esc(b.name)}${b.autopay ? ' <span class="tag">autopay</span>' : ""}${
+            b.in_budget === false ? ' <span class="tag">not in budget</span>' : ""}</div>
           <div class="muted ${w.cls}">${esc(b.next_due)} · ${w.text} · ${esc(this._repeats(b))}</div>
         </button>
         <div class="amt">${this._money(b.amount)}</div>
@@ -632,10 +633,21 @@ class BillsPanel extends HTMLElement {
     }
     const neg = (n) => (n < 0 ? "late" : "");
     const a = B.allowance;
+    // Each later day adds its own allowance (plus anything dated that day), so
+    // show that step, and say why when the daily amount changes.
+    const step = (n) => `${n < 0 ? "−" : "+"}${this._money(Math.abs(n))}`;
     const days = B.days.map((d, i) => `<div class="day">
         <div class="muted small">${esc(this._dayLabel(d.date, i))}</div>
         <div class="dayamt ${neg(d.amount)}">${this._money(d.amount)}</div>
+        ${i && d.change !== undefined ? `<div class="muted small">${step(d.change)}</div>` : ""}
       </div>`).join("");
+    const changes = B.days.filter((d) => d.reasons).map((d) => {
+      const i = B.days.indexOf(d);
+      const why = d.reasons.length ? ` — ${d.reasons.join(", ")}` : "";
+      const when = i === 1 ? "tomorrow" : this._dayLabel(d.date, i);
+      return `<div class="muted small breakdown">From ${esc(when)}:
+        ${this._money(d.allowance)} a day${esc(why)}</div>`;
+    }).join("");
     const hero = `<div class="card hero">
         <div class="muted">Today's budget</div>
         <div class="heroamt ${neg(B.today)}">${this._money(B.today)}</div>
@@ -645,6 +657,7 @@ class BillsPanel extends HTMLElement {
         <div class="days3">${days}</div>
         <div class="muted small breakdown">Each day: ${this._money(a.income)} income
           − ${this._money(a.bills)} bills − ${this._money(a.savings)} savings</div>
+        ${changes}
         ${B.bills_without_amount ? `<div class="muted small breakdown">${B.bills_without_amount} bill${
           B.bills_without_amount === 1 ? " has" : "s have"} no amount, so ${
           B.bills_without_amount === 1 ? "it isn't" : "they aren't"} counted.</div>` : ""}
@@ -1088,6 +1101,10 @@ class BillsPanel extends HTMLElement {
         <label>${edit ? "Next due" : "First due date"}
           <input name="due_date" type="date" required value="${esc(v.next_due)}"></label>
       </div>
+      <label class="check">
+        <input name="in_budget" type="checkbox" ${v.in_budget !== false ? "checked" : ""}>
+        <span>Count in my budget</span></label>
+      <p class="muted small hint" id="budgethint"></p>
       <p class="note-box small" id="noamount" hidden>Without an amount, this bill isn't counted
         in your budget. Add an estimate here, tick <b>Use this as the new estimate</b> when
         you pay it, or record what you pay as an expense in the Budget tab.</p>
@@ -1226,6 +1243,7 @@ class BillsPanel extends HTMLElement {
         end_date: end,
         remind_days_before: remind,
         autopay: f.autopay.checked,
+        in_budget: f.in_budget.checked,
         biller_url: url,
         notes: f.notes.value.trim() || null,
       },
@@ -1642,6 +1660,7 @@ class BillsPanel extends HTMLElement {
       const diffEl = form.querySelector("#budgetdiff");
       const diff = Math.round((parseFloat(v) - b.amount) * 100) / 100;
       const counts = this._budget && this._budget.configured && b.frequency !== "once"
+        && b.in_budget !== false
         && b.amount !== null && b.amount !== undefined && v !== "" && diff;
       diffEl.hidden = !counts;
       if (counts) {
@@ -1672,11 +1691,19 @@ class BillsPanel extends HTMLElement {
     // One-time bills come out of the budget when paid, so the note is only for
     // repeating bills without an amount.
     const noAmount = form.querySelector("#noamount");
+    const hint = form.querySelector("#budgethint");
     const syncNote = () => {
-      noAmount.hidden = f.amount.value !== "" || f.frequency.value === "once";
+      const once = f.frequency.value === "once";
+      noAmount.hidden = !f.in_budget.checked || f.amount.value !== "" || once;
+      hint.textContent = !f.in_budget.checked
+        ? "Payments are only tracked here in Bills; the budget ignores this bill."
+        : once ? "Comes out of the budget on the day you pay it."
+        : f.amount.value !== "" ? "Its amount is set aside from the budget a little each day." : "";
+      hint.hidden = !hint.textContent;
     };
     f.amount.addEventListener("input", syncNote);
     f.frequency.addEventListener("change", syncNote);
+    f.in_budget.addEventListener("change", syncNote);
     syncNote();
     const syncRepeat = () => {
       const freq = f.frequency.value;
@@ -1713,6 +1740,7 @@ class BillsPanel extends HTMLElement {
         due_date: b.next_due, frequency: b.frequency, interval: b.interval,
         end_date: b.end_date ?? null, remind_days_before: b.remind_days_before,
         autopay: b.autopay, biller_url: b.biller_url ?? null, notes: b.notes ?? null,
+        in_budget: b.in_budget !== false,
       };
       const changes = {};
       for (const [key, val] of Object.entries(data)) {

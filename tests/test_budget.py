@@ -209,3 +209,74 @@ def test_changing_an_estimate_later_never_changes_the_past():
     # Past days keep the $40 rate; only today uses the new estimate.
     old_rate, new_rate = 40 * 12 / 365.25, 100 * 12 / 365.25
     assert after["today"] == pytest.approx(before["today"] - (new_rate - old_rate), abs=0.01)
+
+
+# ---------- "Count in my budget" ----------
+
+def test_bill_not_in_budget_is_not_spread():
+    b = fifty_a_day()
+    counted = bill("Rent", 1500)
+    left_out = {**bill("Gym", 30), "in_budget": False}
+    out = budget.compute(b, [counted, left_out], [], TODAY)
+    assert out["allowance"]["bills"] == pytest.approx(49.28, abs=0.01)
+    # Bills from before the setting existed (no key) still count.
+    assert budget.in_budget(bill("Old", 10)) is True
+
+
+def test_bill_not_in_budget_without_amount_isnt_flagged():
+    b = fifty_a_day()
+    bills = [bill("Power", None), {**bill("Gift", None), "in_budget": False}]
+    assert budget.compute(b, bills, [], TODAY)["bills_without_amount"] == 1
+
+
+def test_payment_remembers_whether_it_counted():
+    b = fifty_a_day()
+    fee = bill("Fee", 30, "once", active=False)
+    water = bill("Water", 40)
+    payments = [{**paid("Fee", "2026-11-18", 30), "in_budget": False},
+                {**paid("Water", "2026-11-18", 52, estimate=40), "in_budget": False}]
+    out = budget.compute(b, [fee, water], payments, TODAY)
+    assert out["spent_today"] == 0 and out["bill_adjustments"] == []
+    # Turning the bill back on later doesn't change what that payment did.
+    water["in_budget"] = True
+    assert budget.compute(b, [fee, water], payments, TODAY)["bill_adjustments"] == []
+    # Payments saved before the setting existed still count.
+    old = [paid("Fee", "2026-11-18", 30)]
+    assert budget.compute(b, [fee, water], old, TODAY)["spent_today"] == 30
+
+
+# ---------- the 3-day view ----------
+
+def test_each_day_shows_its_step_and_what_changed():
+    # Like the screenshot: a savings plan starting tomorrow makes tomorrow's
+    # step smaller than today's daily amount.
+    b = fifty_a_day()
+    b["recurring"]["fund"] = stream("Fund", "savings", 70, start="2026-11-19")  # $10/day
+    b["transactions"].append(tx("2026-11-18", "expense", 100))
+    days = budget.compute(b, [], [], TODAY)["days"]
+    assert [d["amount"] for d in days] == [-50, -10, 30]
+    assert [d["change"] for d in days] == [-50, 40, 40]
+    assert [d["allowance"] for d in days] == [50, 40, 40]
+    assert "reasons" not in days[0] and "reasons" not in days[2]
+    assert days[1]["reasons"] == ["Fund (savings plan) starts"]
+
+
+def test_bill_ending_is_a_reason():
+    b = fifty_a_day()
+    days = budget.compute(b, [bill("Loan", 304.38, end="2026-11-18")], [], TODAY)["days"]
+    assert days[1]["reasons"] == ["Loan (bill) ended"]
+
+
+def test_breakdown_adds_up_to_the_daily_amount():
+    # $3,271.06 every 2 weeks, ~$135.56/day of bills and $800.04/month saved:
+    # rounding each part on its own gives 233.65 - 135.56 - 26.28 = 71.81,
+    # one cent off the real 71.80.
+    b = make_budget()
+    b["recurring"]["pay"] = stream("pay", "income", 3271.06, interval=2)
+    b["recurring"]["save"] = stream("save", "savings", 800.04, freq="monthly")
+    bills = [bill("All", 4123.15)]
+    a = budget.compute(b, bills, [], TODAY)["allowance"]
+    assert round(a["income"] - a["bills"] - a["savings"], 2) == a["allowance"]
+    r = budget.day_rates(TODAY, b, bills)
+    for k in ("income", "bills", "savings"):
+        assert abs(a[k] - r[k]) <= 0.0151

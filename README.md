@@ -50,7 +50,8 @@ appears in the sidebar, with **Bills**, **Budget** and **Categories** tabs.
 
 - **Add bill**: name, category, amount (leave it blank if it varies), first due
   date, how often it repeats (weekly, monthly or yearly, every *n*), an optional
-  end date, how many days before to remind you, autopay, payment website and notes.
+  end date, whether to count it in your budget, how many days before to remind
+  you, autopay, payment website and notes.
 - **Pay**: records a payment for the current due date and moves the bill to its
   next one. If the amount differs from the estimate, tick *Use this as the new
   estimate* to update it.
@@ -90,6 +91,12 @@ takes $49.28 a day; $150 to savings every 2 weeks takes $10.71 a day. Bills use
 their estimates (bills without an amount aren't counted); one-time bills come
 out on the day you pay them.
 
+**Bills you don't want in the budget**: untick *Count in my budget* on the
+bill (for example, something paid from a separate account). It's still tracked,
+reminded and summarized on the Bills tab; the budget just ignores it. Each
+payment remembers whether its bill counted when it was paid, so switching this
+later only changes today onward. Bills added before this option existed count.
+
 **When a bill costs more or less than its estimate**, the difference is settled
 on the day you pay it: paying $52 for a $40 water bill takes $12 out of that
 day's budget, and paying $35 gives $5 back. These show in Transactions as
@@ -100,7 +107,10 @@ adjustments.
 **Today's budget** = what carried over + today's allowance + one-off income
 today − expenses today. It updates as soon as you add something. Spend less
 and the rest carries to tomorrow; spend more and tomorrow starts lower. The top
-of the tab shows today and the next two days.
+of the tab shows today and the next two days, each with what it adds. If the
+daily amount changes in the next two days (a savings plan or paycheck starting,
+or a bill ending), a line under the breakdown says so, e.g. *From tomorrow:
+$70.48 a day — Vacation (savings plan) starts*.
 
 At midnight each finished day is locked in, so changing a paycheck, a savings
 plan or a bill's estimate only changes today onward, never the past. (A
@@ -187,7 +197,7 @@ Ones marked *returns* give back data (use *Developer tools → Actions* with
 | Service | What it does |
 |---|---|
 | `add_bill` | Add a bill. Returns its id and first due date. |
-| `update_bill` | Change a bill. Set `amount`, `end_date`, `biller_url`, `notes` or `category` to `null` to clear them. |
+| `update_bill` | Change a bill (`in_budget: false` leaves it out of the budget). Set `amount`, `end_date`, `biller_url`, `notes` or `category` to `null` to clear them. |
 | `retire_bill` / `restore_bill` | Stop tracking a bill / bring it back (optionally with a new `due_date`). |
 | `mark_paid` | Record a payment and move to the next due date. `update_amount: true` makes the amount paid the new estimate. |
 | `list_bills`, `list_payments` | *Returns* bills / payments. |

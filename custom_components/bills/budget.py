@@ -56,6 +56,12 @@ def _active(item: dict[str, Any], day: date) -> bool:
             and (end is None or day <= date.fromisoformat(end)))
 
 
+def in_budget(item: dict[str, Any]) -> bool:
+    """Whether a bill (or a payment, as saved when it was made) counts in the
+    budget. Bills and payments from before this setting existed count."""
+    return item.get("in_budget", True) is not False
+
+
 def day_rates(day: date, budget: dict[str, Any],
               bills: list[dict[str, Any]]) -> dict[str, float]:
     """Income, bills and savings set aside for one day, and what's left."""
@@ -70,7 +76,8 @@ def day_rates(day: date, budget: dict[str, Any],
     bill_rate = sum(
         per_day(b["amount"], b["frequency"], b["interval"])
         for b in bills
-        if b["active"] and b["amount"] is not None and b["frequency"] != "once"
+        if b["active"] and in_budget(b) and b["amount"] is not None
+        and b["frequency"] != "once"
         and (not b.get("end_date") or day <= date.fromisoformat(b["end_date"]))
     )
     return {"income": income, "bills": bill_rate, "savings": savings,
@@ -95,10 +102,12 @@ def days_to_freeze(budget: dict[str, Any], bills: list[dict[str, Any]],
 def one_time_bill_spending(bills: list[dict[str, Any]],
                            payments: list[dict[str, Any]]) -> list[tuple[str, float]]:
     """Payments of one-time bills. Recurring bills are spread per day, but a
-    one-time bill isn't, so it comes out of the budget on the day it's paid."""
+    one-time bill isn't, so it comes out of the budget on the day it's paid.
+    Whether it counts is what the payment saved when it was made."""
     once = {b["id"] for b in bills if b["frequency"] == "once"}
     return [(p["paid_date"], p["amount_paid"]) for p in payments
-            if p["bill_id"] in once and p["amount_paid"] is not None]
+            if p["bill_id"] in once and p["amount_paid"] is not None
+            and in_budget(p)]
 
 
 def bill_adjustments(bills: list[dict[str, Any]],
@@ -110,7 +119,8 @@ def bill_adjustments(bills: list[dict[str, Any]],
     paying less gives the rest back. The estimate used is the one saved on the
     payment when it was made, so changing a bill's estimate later never
     changes an earlier adjustment. Payments without a saved estimate (made
-    before this existed, or for bills without an amount) are left alone.
+    before this existed, or for bills without an amount) are left alone, and
+    so are payments of bills that weren't counted in the budget when paid.
     """
     by_id = {b["id"]: b for b in bills}
     out = []
@@ -118,7 +128,7 @@ def bill_adjustments(bills: list[dict[str, Any]],
         bill = by_id.get(p["bill_id"])
         estimate = p.get("estimate")
         if (bill is None or bill["frequency"] == "once" or estimate is None
-                or p["amount_paid"] is None):
+                or p["amount_paid"] is None or not in_budget(p)):
             continue
         diff = round(p["amount_paid"] - estimate, 2)
         if diff:
@@ -126,6 +136,41 @@ def bill_adjustments(bills: list[dict[str, Any]],
                         "bill_name": p["bill_name"], "date": p["paid_date"],
                         "estimate": estimate, "paid": p["amount_paid"],
                         "difference": diff, "category_id": bill.get("category_id")})
+    return out
+
+
+def changes_on(day: date, budget: dict[str, Any],
+               bills: list[dict[str, Any]]) -> list[str]:
+    """What makes `day`'s allowance differ from the day before: recurring
+    income or savings starting or ending, or bills ending."""
+    prev = (day - timedelta(days=1)).isoformat()
+    iso = day.isoformat()
+    out = []
+    for s in sorted(budget["recurring"].values(), key=lambda s: s["name"].lower()):
+        what = "income" if s["type"] == "income" else "savings plan"
+        if s.get("start_date") == iso:
+            out.append(f"{s['name']} ({what}) starts")
+        if s.get("end_date") == prev:
+            out.append(f"{s['name']} ({what}) ended")
+    for b in sorted(bills, key=lambda b: b["name"].lower()):
+        if (b["active"] and in_budget(b) and b["amount"] is not None
+                and b["frequency"] != "once" and b.get("end_date") == prev):
+            out.append(f"{b['name']} (bill) ended")
+    return out
+
+
+def rounded_rates(r: dict[str, float]) -> dict[str, float]:
+    """Round a day's rates to cents so income - bills - savings still adds up
+    to the rounded allowance (otherwise $233.65 - $135.56 - $26.28 can show
+    next to a $71.80 allowance). The cent goes to bills (a total of many
+    bills), or to savings, so a paycheck still shows its exact rate."""
+    out = {k: round(v, 2) for k, v in r.items()}
+    off = round(out["allowance"] - (out["income"] - out["bills"] - out["savings"]), 2)
+    if off:
+        for k in ("bills", "savings", "income"):
+            if r[k]:
+                out[k] = round(out[k] + (off if k == "income" else -off), 2)
+                break
     return out
 
 
@@ -184,15 +229,19 @@ def compute(budget: dict[str, Any], bills: list[dict[str, Any]],
         saved += r["savings"]
         d += timedelta(days=1)
 
+    today_rates = rates(today) if today >= start else {
+        "income": 0.0, "bills": 0.0, "savings": 0.0, "allowance": 0.0}
     days = []
     for i in range(DAYS_AHEAD + 1):
         d = today + timedelta(days=i)
-        if d >= start:
-            balance += rates(d)["allowance"] + effects.get(d.isoformat(), 0.0)
-        days.append({"date": d.isoformat(), "amount": round(balance, 2)})
-
-    today_rates = rates(today) if today >= start else {
-        "income": 0.0, "bills": 0.0, "savings": 0.0, "allowance": 0.0}
+        allowance = rates(d)["allowance"] if d >= start else 0.0
+        change = allowance + effects.get(d.isoformat(), 0.0) if d >= start else 0.0
+        balance += change
+        day = {"date": d.isoformat(), "amount": round(balance, 2),
+               "allowance": round(allowance, 2), "change": round(change, 2)}
+        if days and d > start and day["allowance"] != days[-1]["allowance"]:
+            day["reasons"] = changes_on(d, budget, bills)
+        days.append(day)
     if today >= start:
         saved += today_rates["savings"]
     saved += to_savings - from_savings
@@ -201,15 +250,15 @@ def compute(budget: dict[str, Any], bills: list[dict[str, Any]],
         for s in budget["recurring"].values()
         if s["type"] == "savings" and _active(s, today)
     )
-    unpriced = sum(1 for b in bills if b["active"] and b["amount"] is None
-                   and b["frequency"] != "once")
+    unpriced = sum(1 for b in bills if b["active"] and in_budget(b)
+                   and b["amount"] is None and b["frequency"] != "once")
     t = today.isoformat()
     return {
         "configured": True,
         "start_date": budget["start_date"],
         "today": days[0]["amount"],
         "days": days,
-        "allowance": {k: round(v, 2) for k, v in today_rates.items()},
+        "allowance": rounded_rates(today_rates),
         "spent_today": round(spent.get(t, 0.0), 2),
         "income_today": round(earned.get(t, 0.0), 2),
         "savings": {

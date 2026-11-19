@@ -18,7 +18,7 @@ from . import backup, budget as budget_logic, schedule
 from .const import STORAGE_KEY, STORAGE_VERSION
 
 UPDATABLE = ("name", "amount", "notes", "biller_url", "autopay",
-             "remind_days_before", "tags")
+             "remind_days_before", "tags", "in_budget")
 SCHEDULE_FIELDS = ("due_date", "frequency", "interval", "end_date")
 
 
@@ -384,6 +384,7 @@ class BillStore:
             "tags": data["tags"],
             "biller_url": data.get("biller_url"),
             "autopay": data["autopay"],
+            "in_budget": data.get("in_budget", True),
             "remind_days_before": data["remind_days_before"],
             "notes": data.get("notes"),
             "category_id": self._category_id(data.get("category")),
@@ -463,6 +464,8 @@ class BillStore:
             # The estimate this payment is measured against in the budget,
             # saved now so later estimate changes never alter it.
             "estimate": bill["amount"],
+            # Likewise whether the bill counted in the budget when paid.
+            "in_budget": budget_logic.in_budget(bill),
         }
         self.payments.append(payment)
         if update_amount and amount is not None:

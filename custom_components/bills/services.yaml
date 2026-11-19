@@ -26,6 +26,10 @@ add_bill:
       selector: {date: }
     autopay:
       selector: {boolean: }
+    in_budget:
+      description: Count this bill in the daily budget (default on).
+      default: true
+      selector: {boolean: }
     remind_days_before:
       default: 3
       selector:
@@ -68,6 +72,9 @@ update_bill:
     end_date:
       selector: {date: }
     autopay:
+      selector: {boolean: }
+    in_budget:
+      description: Count this bill in the daily budget. Changes count from today on.
       selector: {boolean: }
     remind_days_before:
       selector:
