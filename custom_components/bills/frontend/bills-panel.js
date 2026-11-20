@@ -711,7 +711,7 @@ class BillsPanel extends HTMLElement {
           B.income_today ? ` · ${this._money(B.income_today)} income today` : ""}</div>
         <div class="days3">${days}</div>
         ${changes}
-        ${this._breakdown(a, B.bills_without_amount)}
+        ${this._dailyBreakdown(a, B.bills_without_amount)}
       </div>`;
     return `${hero}
       <h2>Today's transactions</h2>
@@ -735,7 +735,7 @@ class BillsPanel extends HTMLElement {
   }
 
   // What each day is made of, behind an eye button so the card stays short.
-  _breakdown(a, unpriced) {
+  _dailyBreakdown(a, unpriced) {
     if (!this._showBreakdown) {
       return `<button class="link iconbtn2 eyebtn" id="toggle-breakdown" aria-expanded="false"
           aria-label="Show what each day is made of" title="Show what each day is made of">${
@@ -1472,9 +1472,9 @@ class BillsPanel extends HTMLElement {
     else {
       body = `<h2>Upcoming</h2>
         <div class="card">${this._billsList()}</div>
-        ${this._costs_html()}
         <h2>Recent payments</h2>
         <div class="card">${this._paymentsList()}</div>
+        ${this._costs_html()}
         ${this._retiredSection()}`;
     }
 
