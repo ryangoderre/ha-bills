@@ -139,6 +139,90 @@ def bill_adjustments(bills: list[dict[str, Any]],
     return out
 
 
+def budget_rows(budget: dict[str, Any], bills: list[dict[str, Any]],
+                payments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Everything the Budget tab lists as a transaction, newest first.
+
+    Transactions plus, read-only, bill payments that touch the budget: the
+    difference from the estimate for recurring bills, and the whole payment
+    for one-time bills (both only from the budget's start date, like the
+    budget itself).
+    """
+    start = budget["start_date"] or ""
+    rows = list(budget["transactions"])
+    for a in bill_adjustments(bills, payments):
+        if a["date"] >= start:
+            rows.append({
+                "id": f"adj-{a['payment_id']}", "date": a["date"], "kind": "bill_adjustment",
+                "amount": abs(a["difference"]), "difference": a["difference"],
+                "estimate": a["estimate"], "paid": a["paid"], "bill_id": a["bill_id"],
+                "category_id": a["category_id"], "note": a["bill_name"],
+                "created": a["date"], "readonly": True,
+            })
+    once = {b["id"]: b for b in bills if b["frequency"] == "once"}
+    for p in payments:
+        bill = once.get(p["bill_id"])
+        if (bill and p["amount_paid"] is not None and in_budget(p)
+                and p["paid_date"] >= start):
+            rows.append({
+                "id": f"bill-{p.get('id')}", "date": p["paid_date"], "kind": "bill_payment",
+                "amount": p["amount_paid"], "bill_id": p["bill_id"],
+                "category_id": bill.get("category_id"), "note": p["bill_name"],
+                "created": p["paid_date"], "readonly": True,
+            })
+    return sorted(rows, key=lambda t: (t["date"], t.get("created") or ""), reverse=True)
+
+
+NOTES_MAX = 200  # per kind, for the note suggestions in the + Add form
+
+
+def recent_notes(transactions: list[dict[str, Any]],
+                 category_names: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+    """Notes typed on earlier expenses and income, newest first, once each
+    (ignoring case), with the category last used with them. Notes that were
+    filled in automatically (the category name, or "Expense"/"Income") are
+    left out."""
+    out: dict[str, list[dict[str, Any]]] = {"expense": [], "income": []}
+    seen: dict[str, set[str]] = {"expense": set(), "income": set()}
+    defaults = {"expense": "expense", "income": "income"}
+    for t in sorted(transactions, key=lambda t: (t["date"], t.get("created") or ""),
+                    reverse=True):
+        kind = t["kind"]
+        note = (t.get("note") or "").strip()
+        if kind not in out or not note or len(out[kind]) >= NOTES_MAX:
+            continue
+        key = note.lower()
+        if key == defaults[kind] or key == category_names.get(t.get("category_id"), "").lower():
+            continue
+        if key not in seen[kind]:
+            seen[kind].add(key)
+            out[kind].append({"note": note, "category_id": t.get("category_id")})
+    return out
+
+
+def row_spent(row: dict[str, Any]) -> float:
+    """How much a listed row counts as spending (same as "spent today")."""
+    if row["kind"] in ("expense", "bill_payment"):
+        return row["amount"]
+    if row["kind"] == "bill_adjustment" and row["difference"] > 0:
+        return row["difference"]
+    return 0.0
+
+
+def day_totals(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """{ISO date: {spent, income, count}} for the days that have rows."""
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        t = out.setdefault(r["date"], {"spent": 0.0, "income": 0.0, "count": 0})
+        t["spent"] += row_spent(r)
+        if r["kind"] == "income":
+            t["income"] += r["amount"]
+        t["count"] += 1
+    for t in out.values():
+        t["spent"], t["income"] = round(t["spent"], 2), round(t["income"], 2)
+    return out
+
+
 def changes_on(day: date, budget: dict[str, Any],
                bills: list[dict[str, Any]]) -> list[str]:
     """What makes `day`'s allowance differ from the day before: recurring
@@ -237,7 +321,12 @@ def compute(budget: dict[str, Any], bills: list[dict[str, Any]],
         allowance = rates(d)["allowance"] if d >= start else 0.0
         change = allowance + effects.get(d.isoformat(), 0.0) if d >= start else 0.0
         balance += change
-        day = {"date": d.isoformat(), "amount": round(balance, 2),
+        # Later days are the previous day plus the step shown under them, so
+        # the displayed numbers always add up (rounding each running total on
+        # its own could put them a cent apart).
+        amount = (round(days[-1]["amount"] + round(change, 2), 2) if days
+                  else round(balance, 2))
+        day = {"date": d.isoformat(), "amount": amount,
                "allowance": round(allowance, 2), "change": round(change, 2)}
         if days and d > start and day["allowance"] != days[-1]["allowance"]:
             day["reasons"] = changes_on(d, budget, bills)

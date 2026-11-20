@@ -271,18 +271,26 @@ class BillStore:
         out["recurring"] = sorted(
             self.budget["recurring"].values(),
             key=lambda s: (s["type"], s["name"].lower()))
-        # Bill payment differences show in the transaction list (read-only).
-        adjustments = [{
-            "id": f"adj-{a['payment_id']}", "date": a["date"], "kind": "bill_adjustment",
-            "amount": abs(a["difference"]), "difference": a["difference"],
-            "estimate": a["estimate"], "paid": a["paid"], "bill_id": a["bill_id"],
-            "category_id": a["category_id"], "note": a["bill_name"],
-            "created": a["date"], "readonly": True,
-        } for a in out.get("bill_adjustments", [])]
-        out["transactions"] = sorted(
-            self.budget["transactions"] + adjustments,
-            key=lambda t: (t["date"], t["created"]), reverse=True)[:50]
+        # Today's (and any future-dated) transactions; earlier days are
+        # summed per day and fetched one day at a time with transactions_on.
+        today = self._today().isoformat()
+        rows = budget_logic.budget_rows(self.budget, bills, self.payments)
+        out["transactions"] = [r for r in rows if r["date"] >= today]
+        out["day_totals"] = budget_logic.day_totals(
+            [r for r in rows if r["date"] < today])
+        out["recent_notes"] = budget_logic.recent_notes(
+            self.budget["transactions"],
+            {c["id"]: c["name"] for c in self.categories.values()})
         return out
+
+    def transactions_on(self, day: str) -> dict[str, Any]:
+        """One day's transactions, with how much was spent and earned."""
+        bills = self.list_bills(include_retired=True)
+        rows = [r for r in budget_logic.budget_rows(self.budget, bills, self.payments)
+                if r["date"] == day]
+        totals = budget_logic.day_totals(rows).get(
+            day, {"spent": 0.0, "income": 0.0, "count": 0})
+        return {"date": day, "transactions": rows, **totals}
 
     # ---------- categories ----------
 

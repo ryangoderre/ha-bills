@@ -280,3 +280,68 @@ def test_breakdown_adds_up_to_the_daily_amount():
     r = budget.day_rates(TODAY, b, bills)
     for k in ("income", "bills", "savings"):
         assert abs(a[k] - r[k]) <= 0.0151
+
+
+def test_three_days_add_up_to_the_cent():
+    # The real data that showed -180.62 -> -110.13 (+70.49) under a +70.48 step.
+    b = make_budget(start="2026-11-13")
+    b["recurring"]["pay"] = stream("pay", "income", 3271.06, interval=2, start="2026-11-13")
+    for sid, amt, freq, start in (("ef", 150, "weekly", "2026-11-13"), ("ex", 80, "weekly", "2026-11-13"),
+                                  ("opie", 40, "monthly", "2026-11-19"), ("auto", 300, "monthly", "2026-11-11")):
+        b["recurring"][sid] = stream(sid, "savings", amt, freq=freq,
+                                     interval=2 if freq == "weekly" else 1, start=start)
+    b["transactions"].append(tx("2026-11-18", "expense", 752.37))
+    days = budget.compute(b, [bill("All", 4123.29)], [], date(2026, 11, 19))["days"]
+    for prev, d in zip(days, days[1:]):
+        assert round(prev["amount"] + d["change"], 2) == d["amount"]
+
+
+def test_rows_list_transactions_and_bill_payments_newest_first():
+    b = make_budget(start="2026-11-10")
+    b["transactions"] += [tx("2026-11-17", "expense", 12.5), tx("2026-11-18", "income", 20),
+                          tx("2026-11-17", "to_savings", 100)]
+    bills = [bill("Water", 40), bill("Fee", 30, "once", active=False)]
+    payments = [paid("Water", "2026-11-17", 52, estimate=40),
+                paid("Water", "2026-11-12", 35, estimate=40),
+                paid("Fee", "2026-11-16", 30),
+                paid("Fee", "2026-11-01", 99)]  # before the budget started
+    rows = budget.budget_rows(b, bills, payments)
+    assert [(r["date"], r["kind"]) for r in rows][0] == ("2026-11-18", "income")
+    assert {r["kind"] for r in rows if r["date"] == "2026-11-17"} == {
+        "expense", "to_savings", "bill_adjustment"}
+    assert all(r["date"] >= "2026-11-10" or r["kind"] in budget.KINDS for r in rows)
+    fee = next(r for r in rows if r["kind"] == "bill_payment")
+    assert fee["date"] == "2026-11-16" and fee["amount"] == 30 and fee["readonly"]
+
+
+def test_recent_notes_newest_first_once_each_without_automatic_ones():
+    def t(day, kind, note, cat=None, created=None):
+        return {"id": note + day, "date": day, "kind": kind, "amount": 5, "note": note,
+                "category_id": cat, "created": created or day}
+    txs = [t("2026-11-10", "expense", "Chipotle", "food"),
+           t("2026-11-15", "expense", "chipotle", "eat"),       # same note, newer
+           t("2026-11-12", "expense", "Dining", "food"),         # auto: category name
+           t("2026-11-13", "expense", "Expense"),                # auto: no category
+           t("2026-11-14", "income", "Card rewards"),
+           t("2026-11-14", "to_savings", "Rainy day"),           # savings moves aren't suggested
+           t("2026-11-16", "expense", "  ")]
+    notes = budget.recent_notes(txs, {"food": "Dining", "eat": "Eating out"})
+    assert notes["expense"] == [{"note": "chipotle", "category_id": "eat"}]
+    assert notes["income"] == [{"note": "Card rewards", "category_id": None}]
+
+
+def test_day_totals_match_what_counts_as_spending():
+    b = make_budget(start="2026-11-10")
+    b["transactions"] += [tx("2026-11-17", "expense", 12.5), tx("2026-11-17", "income", 5),
+                          tx("2026-11-17", "to_savings", 100)]
+    bills = [bill("Water", 40), bill("Fee", 30, "once", active=False)]
+    payments = [paid("Water", "2026-11-17", 52, estimate=40),   # $12 over: spent
+                paid("Water", "2026-11-12", 35, estimate=40),   # $5 under: not spending
+                paid("Fee", "2026-11-16", 30)]
+    totals = budget.day_totals(budget.budget_rows(b, bills, payments))
+    assert totals["2026-11-17"] == {"spent": 24.5, "income": 5, "count": 4}
+    assert totals["2026-11-16"] == {"spent": 30, "income": 0, "count": 1}
+    assert totals["2026-11-12"]["spent"] == 0 and "2026-11-15" not in totals
+    # Same rule as "spent today" in the daily budget.
+    day = date(2026, 11, 17)
+    assert budget.compute(b, bills, payments, day)["spent_today"] == 24.5

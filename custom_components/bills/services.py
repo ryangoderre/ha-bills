@@ -24,7 +24,8 @@ SERVICES = ("add_bill", "update_bill", "retire_bill", "restore_bill", "mark_paid
             "list_categories", "cost_summary", "bill_history",
             "budget_setup", "add_expense", "add_income", "move_to_savings",
             "take_from_savings", "delete_transaction", "add_recurring",
-            "update_recurring", "delete_recurring", "budget_summary")
+            "update_recurring", "delete_recurring", "budget_summary",
+            "list_transactions")
 
 _NONNEG_INT = vol.All(vol.Coerce(int), vol.Range(min=0))
 _INTERVAL = vol.All(vol.Coerce(int), vol.Range(min=1))
@@ -131,6 +132,8 @@ SAVINGS_MOVE_SCHEMA = vol.Schema({
 })
 
 DELETE_TRANSACTION_SCHEMA = vol.Schema({vol.Required("transaction"): cv.string})
+
+LIST_TRANSACTIONS_SCHEMA = vol.Schema({vol.Required("date"): cv.date})
 
 ADD_RECURRING_SCHEMA = vol.Schema({
     vol.Required("type"): vol.In(STREAM_TYPES),
@@ -293,6 +296,9 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
     async def budget_summary(call: ServiceCall):
         return store.budget_summary()
 
+    async def list_transactions(call: ServiceCall):
+        return store.transactions_on(call.data["date"].isoformat())
+
     optional = SupportsResponse.OPTIONAL
     only = SupportsResponse.ONLY
     for name, handler, schema, resp in (
@@ -323,6 +329,7 @@ def async_register_services(hass: HomeAssistant, store: BillStore) -> None:
         ("update_recurring", update_recurring, UPDATE_RECURRING_SCHEMA, optional),
         ("delete_recurring", delete_recurring, RECURRING_SCHEMA, optional),
         ("budget_summary", budget_summary, vol.Schema({}), only),
+        ("list_transactions", list_transactions, LIST_TRANSACTIONS_SCHEMA, only),
     ):
         hass.services.async_register(
             DOMAIN, name, handler, schema=schema, supports_response=resp

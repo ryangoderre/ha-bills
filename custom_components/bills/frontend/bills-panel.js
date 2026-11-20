@@ -4,6 +4,31 @@ const esc = (s) =>
   ));
 
 const todayIso = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, local time
+// The ISO date `n` days from `iso` (negative for earlier).
+const addDays = (iso, n) => {
+  const d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toLocaleDateString("sv-SE");
+};
+
+// Amount fields fill like a cash register: digits come in from the right with
+// the cents already placed (2 -> 0.02, 120 -> 1.20, 1200 -> 12.00).
+// Backspace takes the last digit off (1.25 -> 0.12); backspacing past the
+// last digit leaves the field empty (so a bill can go back to "Varies").
+const MONEY_DIGITS = 9;
+const typedMoney = (raw, deleting = false) => {
+  const neg = raw.trim().startsWith("-");
+  let digits = raw.replace(/\D/g, "");
+  if (deleting && /^0*$/.test(digits)) digits = "";
+  digits = digits.replace(/^0+(?=\d)/, "").slice(0, MONEY_DIGITS);
+  if (!digits) return neg ? "-" : "";
+  const d = digits.padStart(3, "0");
+  return `${neg ? "-" : ""}${d.slice(0, -2)}.${d.slice(-2)}`;
+};
+// A saved amount shown in a money field (85 -> "85.00"); empty stays empty.
+const moneyValue = (n) => (n === null || n === undefined || n === "" ? "" : Number(n).toFixed(2));
+// Attributes for a money field: a text box with the digits keypad.
+const MONEY_INPUT = 'type="text" inputmode="numeric" autocomplete="off" data-money';
 
 const FREQUENCIES = [
   ["once", "Doesn't repeat"],
@@ -22,6 +47,9 @@ const NEW_BILL = {
 const UPCOMING_LIMIT = 3;
 const RECENT_PAYMENTS = 5;      // Recent payments shows this many until expanded
 const RECENT_PAYMENTS_MAX = 25; // and at most this many when expanded
+const RECENT_TX = 3;            // Today's transactions shows this many until expanded
+const NOTE_SUGGESTIONS = 5;     // + Add form: earlier notes shown while typing one
+const PAST_DAY_CHIPS = 30;      // Previous days: a chip per day, with what was spent, scrolled sideways
 const BILL_ICON = "mdi:file-document-outline";      // bills without a category
 const UNCATEGORIZED_ICON = "mdi:shape-outline";
 const DEFAULT_CATEGORY_ICON = "mdi:tag";
@@ -38,6 +66,23 @@ class BillsPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
+    this.shadowRoot.addEventListener("input", (ev) => {
+      const el = ev.target;
+      if (!el.matches || !el.matches("[data-money]")) return;
+      const deleting = (ev.inputType || "").startsWith("delete")
+        || el.value.length < (el._moneyPrev ?? el.defaultValue).length;
+      const v = typedMoney(el.value, deleting);
+      if (v !== el.value) el.value = v;
+      el._moneyPrev = v;
+      el.setSelectionRange(v.length, v.length);  // keep typing at the end
+    }, true);
+    // Tapping a money field that already has an amount (a bill's estimate on
+    // the pay form, an amount being edited) selects it, so typing replaces it.
+    this.shadowRoot.addEventListener("focusin", (ev) => {
+      const el = ev.target;
+      if (!el.matches || !el.matches("[data-money]") || !el.value) return;
+      setTimeout(() => { if (el.isConnected) el.setSelectionRange(0, el.value.length); }, 0);
+    });
     this._bills = [];    // active
     this._retired = [];  // retired, most recently retired first
     this._showRetired = false;
@@ -53,6 +98,11 @@ class BillsPanel extends HTMLElement {
     this._budget = null;   // from bills.budget_summary
     this._showAllTx = false;
     this._confirmTx = null;  // transaction id waiting for "Delete" confirmation
+    this._txDay = addDays(todayIso(), -1);  // Previous days: the day being shown
+    this._dayTx = null;      // from bills.list_transactions for _txDay
+    this._txOpen = false;    // Previous days: only the date picker until a day is picked
+    this._showBreakdown = false;  // "Each day: income − bills − savings" under the eye
+    try { this._showBreakdown = localStorage.getItem("bills-panel-breakdown") === "1"; } catch (e) { /* private mode */ }
     // _form: null, or { kind, id, ... } where kind is
     // "pay" | "edit" | "add" | "restore" | "history" (Bills tab),
     // "tx" | "stream" | "savemove" | "budgetsetup" (Budget tab) or "category" (Categories tab)
@@ -152,14 +202,19 @@ class BillsPanel extends HTMLElement {
 
   async _refresh(initial = false) {
     try {
-      const [b, p, c, costs, budget] = await Promise.all([
+      // After midnight, "yesterday" moves on; keep showing the day picked
+      // unless it's now today (which belongs in Today's transactions).
+      if (this._txDay >= todayIso()) this._txDay = addDays(todayIso(), -1);
+      const [b, p, c, costs, budget, dayTx] = await Promise.all([
         this._call("list_bills", { include_retired: true }),
         this._call("list_payments"),
         this._call("list_categories"),
         this._call("cost_summary"),
         this._call("budget_summary"),
+        this._txOpen ? this._call("list_transactions", { date: this._txDay }) : null,
       ]);
       this._budget = budget;
+      if (dayTx) this._dayTx = dayTx;
       this._bills = b.bills.filter((x) => x.active);
       this._retired = b.bills.filter((x) => !x.active).sort((x, y) =>
         (y.retired_on || "").localeCompare(x.retired_on || ""));
@@ -655,16 +710,14 @@ class BillsPanel extends HTMLElement {
           B.spent_today ? ` · spent ${this._money(B.spent_today)} today` : ""}${
           B.income_today ? ` · ${this._money(B.income_today)} income today` : ""}</div>
         <div class="days3">${days}</div>
-        <div class="muted small breakdown">Each day: ${this._money(a.income)} income
-          − ${this._money(a.bills)} bills − ${this._money(a.savings)} savings</div>
         ${changes}
-        ${B.bills_without_amount ? `<div class="muted small breakdown">${B.bills_without_amount} bill${
-          B.bills_without_amount === 1 ? " has" : "s have"} no amount, so ${
-          B.bills_without_amount === 1 ? "it isn't" : "they aren't"} counted.</div>` : ""}
+        ${this._breakdown(a, B.bills_without_amount)}
       </div>`;
     return `${hero}
-      <h2>Transactions</h2>
+      <h2>Today's transactions</h2>
       <div class="card">${this._txList()}</div>
+      <h2>Previous days' transactions</h2>
+      <div class="card">${this._pastDays()}</div>
       <div class="section-head"><h2>Income</h2>
         <button class="link addlink" data-newstream="income">+ Recurring income</button></div>
       <div class="card">${this._streamList("income")}</div>
@@ -678,19 +731,105 @@ class BillsPanel extends HTMLElement {
     if (c) return c.icon;
     return { expense: "mdi:cart-outline", income: "mdi:cash-plus",
              to_savings: "mdi:piggy-bank", from_savings: "mdi:piggy-bank-outline",
-             bill_adjustment: BILL_ICON }[t.kind];
+             bill_adjustment: BILL_ICON, bill_payment: BILL_ICON }[t.kind];
   }
 
+  // What each day is made of, behind an eye button so the card stays short.
+  _breakdown(a, unpriced) {
+    if (!this._showBreakdown) {
+      return `<button class="link iconbtn2 eyebtn" id="toggle-breakdown" aria-expanded="false"
+          aria-label="Show what each day is made of" title="Show what each day is made of">${
+        this._icon("mdi:eye-outline", "tiny muted-icon")}</button>`;
+    }
+    return `<div class="muted small breakdown">Each day: ${this._money(a.income)} income
+          − ${this._money(a.bills)} bills − ${this._money(a.savings)} savings</div>
+        ${unpriced ? `<div class="muted small breakdown">${unpriced} bill${
+          unpriced === 1 ? " has" : "s have"} no amount, so ${
+          unpriced === 1 ? "it isn't" : "they aren't"} counted.</div>` : ""}
+        <button class="link iconbtn2 eyebtn" id="toggle-breakdown" aria-expanded="true"
+          aria-label="Hide what each day is made of" title="Hide">${
+        this._icon("mdi:eye-off-outline", "tiny muted-icon")}</button>`;
+  }
+
+  // Today's transactions (and any dated later), RECENT_TX until expanded.
   _txList() {
     const all = this._budget.transactions || [];
     if (!all.length) {
-      return `<p class="muted">Nothing yet. Tap <b>+ Add</b> to record spending or income.</p>`;
+      return `<p class="muted">Nothing spent today. Tap <b>+ Add</b> to record spending or income.</p>`;
     }
-    const list = all.slice(0, this._showAllTx ? RECENT_PAYMENTS_MAX : RECENT_PAYMENTS);
-    const sign = { expense: -1, income: 1, to_savings: -1, from_savings: 1 };
+    const rows = this._txRows(this._showAllTx ? all : all.slice(0, RECENT_TX), todayIso());
+    const more = all.length - RECENT_TX;
+    const toggle = more > 0 ? `<button class="link showmore" id="toggle-tx">${
+      this._showAllTx ? "Show fewer" : `Show ${more} more`}</button>` : "";
+    return rows + toggle;
+  }
+
+  // A row of day chips (newest first) with what was spent each day. Tapping
+  // one opens that day: arrows and a date picker for any earlier day, its
+  // total and its transactions.
+  _pastDays() {
+    const yesterday = addDays(todayIso(), -1);
+    const totals = this._budget.day_totals || {};
+    const sel = this._txOpen ? this._txDay : null;
+    const fmtDay = (iso, opts) => new Date(iso + "T12:00:00").toLocaleDateString(undefined, opts);
+    // The last PAST_DAY_CHIPS days, or back to the day picked if it's older.
+    const days = [];
+    for (let d = yesterday, i = 0; i < PAST_DAY_CHIPS || (sel && d >= sel); d = addDays(d, -1), i++) {
+      days.push(d);
+    }
+    const chips = days.map((d) => {
+      const t = totals[d];
+      const label = d === yesterday ? "Yesterday"
+        : `${fmtDay(d, { weekday: "short" })} ${Number(d.slice(5, 7))}/${Number(d.slice(8))}`;
+      return `<button class="chip ${d === sel ? "sel" : ""}" data-txday="${d}" aria-pressed="${d === sel}">
+          <span>${esc(label)}</span><b>${t && t.spent ? this._money(t.spent) : "—"}</b>
+        </button>`;
+    }).join("");
+    if (!sel) return `<div class="daychips">${chips}</div>`;
+    const t = totals[sel] || { spent: 0, income: 0, count: 0 };
+    const loaded = this._dayTx && this._dayTx.date === sel;
+    const list = !loaded ? `<p class="muted small">Loading…</p>`
+      : this._dayTx.transactions.length ? this._txRows(this._dayTx.transactions, sel)
+      : `<p class="muted small">Nothing recorded on this day.</p>`;
+    return `<div class="daychips">${chips}</div>
+      <div class="daynav">
+        <button class="link iconbtn2" id="txday-prev" aria-label="Previous day" title="Previous day">${
+          this._icon("mdi:chevron-left")}</button>
+        <input type="date" id="txday" name="txday" aria-label="Day" value="${sel}" max="${yesterday}">
+        <button class="link iconbtn2" id="txday-next" aria-label="Next day" title="Next day"
+          ${sel >= yesterday ? "disabled" : ""}>${this._icon("mdi:chevron-right")}</button>
+      </div>
+      <div class="daytotal">
+        <div class="muted small">${esc(fmtDay(sel, { weekday: "long", month: "long", day: "numeric", year: "numeric" }))}</div>
+        <div><span class="muted">Spent</span> <b class="dayspent">${this._money(t.spent)}</b>${
+          t.income ? ` <span class="muted">· income ${this._money(t.income)}</span>` : ""}</div>
+      </div>
+      ${list}
+      <button class="link showmore" id="txday-hide">Hide</button>`;
+  }
+
+  async _showTxDay(day) {
+    const yesterday = addDays(todayIso(), -1);
+    if (!day) return;
+    this._txDay = day > yesterday ? yesterday : day;
+    this._txOpen = true;
+    this._confirmTx = null;
+    this._render();  // the total shows straight away; the list follows
+    try {
+      const res = await this._call("list_transactions", { date: this._txDay });
+      if (res.date === this._txDay) { this._dayTx = res; this._render(); }
+    } catch (e) {
+      this._error = e.message || String(e);
+      this._render();
+    }
+  }
+
+  // The date is left off rows dated `day` (the day the list is about).
+  _txRows(list, day) {
+    const sign = { expense: -1, income: 1, to_savings: -1, from_savings: 1, bill_payment: -1 };
     const kindLabel = { expense: "", income: "income", to_savings: "to savings",
-                        from_savings: "from savings" };
-    const rows = list.map((t) => {
+                        from_savings: "from savings", bill_payment: "bill" };
+    return list.map((t) => {
       const c = this._category(t.category_id);
       const adj = t.kind === "bill_adjustment";
       // A bill paid for more (or less) than its estimate: the difference is
@@ -698,9 +837,10 @@ class BillsPanel extends HTMLElement {
       const name = adj
         ? `${t.note}: ${this._money(t.amount)} ${t.difference > 0 ? "over" : "under"} estimate`
         : t.note;
+      const date = t.date === day ? "" : t.date;
       const bits = adj
-        ? [t.date, `paid ${this._money(t.paid)}, estimate ${this._money(t.estimate)}`]
-        : [t.date, c ? c.name : "", kindLabel[t.kind]].filter(Boolean);
+        ? [date, `paid ${this._money(t.paid)}, estimate ${this._money(t.estimate)}`].filter(Boolean)
+        : [date, c ? c.name : "", kindLabel[t.kind]].filter(Boolean);
       const amt = adj ? -t.difference : sign[t.kind] * t.amount;
       const confirming = this._confirmTx === t.id;
       return `<div class="row">
@@ -718,10 +858,6 @@ class BillsPanel extends HTMLElement {
                title="Delete">${this._icon("mdi:close", "tiny muted-icon")}</button>`}
       </div>`;
     }).join("");
-    const more = Math.min(all.length, RECENT_PAYMENTS_MAX) - RECENT_PAYMENTS;
-    const toggle = more > 0 ? `<button class="link showmore" id="toggle-tx">${
-      this._showAllTx ? "Show fewer" : `Show ${more} more`}</button>` : "";
-    return rows + toggle;
   }
 
   _streamList(type) {
@@ -774,13 +910,15 @@ class BillsPanel extends HTMLElement {
       </div>
       <div class="err" data-formerr hidden></div>
       <label>Amount
-        <input name="amount" class="bigin" type="number" step="0.01" min="0.01" inputmode="decimal"
+        <input name="amount" class="bigin" ${MONEY_INPUT}
                placeholder="0.00" autofocus></label>
       <label>Category
         <span class="inline"><span id="caticon">${this._icon(BILL_ICON, "lead")}</span>
           <select name="category">${this._catOptions(null)}</select></span></label>
       <label>Note (optional)
-        <input name="note" type="text" autocomplete="off" placeholder="Uses the category name if empty"></label>
+        <input name="note" type="text" autocomplete="off" placeholder="Uses the category name if empty"
+               role="combobox" aria-autocomplete="list" aria-controls="notesuggest" aria-expanded="false"></label>
+      <div id="notesuggest" class="suggest" role="listbox" aria-label="Earlier notes" hidden></div>
       <label data-income>How often
         <select name="often">${this._oftenOptions("once", true)}</select></label>
       <label data-once>Date
@@ -810,8 +948,8 @@ class BillsPanel extends HTMLElement {
                placeholder="${income ? "e.g. Paycheck" : "e.g. Emergency fund"}"></label>
       <div class="two">
         <label>Amount
-          <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal"
-                 value="${s ? s.amount : ""}" placeholder="0.00" ${edit ? "" : "autofocus"}></label>
+          <input name="amount" ${MONEY_INPUT}
+                 value="${s ? moneyValue(s.amount) : ""}" placeholder="0.00" ${edit ? "" : "autofocus"}></label>
         <label>How often
           <select name="often">${this._oftenOptions(key, false)}</select></label>
       </div>
@@ -851,7 +989,7 @@ class BillsPanel extends HTMLElement {
         : "Takes it out of savings and adds it to today's budget."}</p>
       <div class="err" data-formerr hidden></div>
       <label>Amount
-        <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal"
+        <input name="amount" ${MONEY_INPUT}
                placeholder="0.00" autofocus></label>
       <label>Note (optional) <input name="note" type="text" autocomplete="off"></label>
       <label>Date <input name="date" type="date" value="${todayIso()}" max="${todayIso()}"></label>
@@ -874,10 +1012,10 @@ class BillsPanel extends HTMLElement {
         <input name="start" type="date" value="${esc(first ? todayIso() : B.start_date)}" max="${todayIso()}"></label>
       <div class="two">
         <label>Starting spending money
-          <input name="amount" type="number" step="0.01" inputmode="decimal" value="${first ? "" : ""}"
+          <input name="amount" ${MONEY_INPUT}
                  placeholder="0.00"></label>
         <label>Savings you already have
-          <input name="savings" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+          <input name="savings" ${MONEY_INPUT} placeholder="0.00"></label>
       </div>
       <div class="actions">
         ${first ? "" : `<button type="button" class="secondary" data-cancel>Cancel</button>`}
@@ -907,11 +1045,53 @@ class BillsPanel extends HTMLElement {
       sync();
     }));
     f.often.addEventListener("change", sync);
-    f.category.addEventListener("change", () => {
+    const showCatIcon = () => {
       form.querySelector("#caticon").innerHTML =
         this._billIcon({ category_id: f.category.value || null });
-    });
+    };
+    f.category.addEventListener("change", showCatIcon);
     sync();
+
+    // Notes used before: typing "Ch" offers "Chipotle". Ones starting with
+    // what's typed come first, then ones containing it.
+    const box = form.querySelector("#notesuggest");
+    const hide = () => { box.hidden = true; f.note.setAttribute("aria-expanded", "false"); };
+    const suggest = () => {
+      const q = f.note.value.trim().toLowerCase();
+      const notes = ((this._budget && this._budget.recent_notes) || {})[type] || [];
+      const hits = !q ? [] : [
+        ...notes.filter((n) => n.note.toLowerCase().startsWith(q)),
+        ...notes.filter((n) => !n.note.toLowerCase().startsWith(q) && n.note.toLowerCase().includes(q)),
+      ].filter((n) => n.note.toLowerCase() !== q).slice(0, NOTE_SUGGESTIONS);
+      if (!hits.length) return hide();
+      box.innerHTML = hits.map((n, i) => {
+        const c = this._category(n.category_id);
+        return `<button type="button" class="suggestion" role="option" data-note="${i}">
+            <span>${esc(n.note)}</span>${c ? `<span class="muted small">${esc(c.name)}</span>` : ""}
+          </button>`;
+      }).join("");
+      box.querySelectorAll("[data-note]").forEach((b) => {
+        // pointerdown keeps the field focused (and the keyboard up) on phones.
+        b.addEventListener("pointerdown", (e) => e.preventDefault());
+        b.addEventListener("click", () => {
+          const n = hits[Number(b.dataset.note)];
+          f.note.value = n.note;
+          // Fill in the category used with it last time, unless one's picked.
+          if (!f.category.value && this._category(n.category_id)) {
+            f.category.value = n.category_id;
+            showCatIcon();
+          }
+          hide();
+        });
+      });
+      box.hidden = false;
+      f.note.setAttribute("aria-expanded", "true");
+    };
+    f.note.addEventListener("input", suggest);
+    f.note.addEventListener("focus", suggest);
+    f.note.addEventListener("blur", hide);
+    f.note.addEventListener("keydown", (e) => { if (e.key === "Escape") hide(); });
+    form.querySelectorAll(".segbtn").forEach((b) => b.addEventListener("click", hide));
 
     form.addEventListener("submit", (ev) => {
       ev.preventDefault();
@@ -1031,8 +1211,8 @@ class BillsPanel extends HTMLElement {
       <p class="muted ${w.cls}">Due ${esc(b.next_due)} · ${w.text}</p>
       <div class="err" data-formerr hidden></div>
       <label>Amount paid
-        <input name="amount" type="number" step="0.01" min="0" inputmode="decimal"
-               value="${b.amount ?? ""}" placeholder="0.00" autofocus></label>
+        <input name="amount" ${MONEY_INPUT}
+               value="${moneyValue(b.amount)}" placeholder="0.00" autofocus></label>
       <label class="check" id="estrow" hidden>
         <input name="update_amount" type="checkbox">
         <span>Use this as the new estimate <span class="muted">(${esc(current)})</span></span></label>
@@ -1096,8 +1276,8 @@ class BillsPanel extends HTMLElement {
         <b>Categories</b> tab.</p>`}
       <div class="two">
         <label>Amount
-          <input name="amount" type="number" step="0.01" min="0" inputmode="decimal"
-                 value="${v.amount ?? ""}" placeholder="Varies"></label>
+          <input name="amount" ${MONEY_INPUT}
+                 value="${moneyValue(v.amount)}" placeholder="Varies"></label>
         <label>${edit ? "Next due" : "First due date"}
           <input name="due_date" type="date" required value="${esc(v.next_due)}"></label>
       </div>
@@ -1328,8 +1508,12 @@ class BillsPanel extends HTMLElement {
         .tag { font-size: 11px; border: 1px solid var(--divider-color); border-radius: 8px; padding: 1px 6px; font-weight: 400; }
         label { display: block; margin: 12px 0; font-size: 14px; color: var(--secondary-text-color); }
         input, select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 10px;
-                font-size: 16px; border-radius: 8px; border: 1px solid var(--divider-color);
+                font-size: 16px; line-height: 1.25; border-radius: 8px; border: 1px solid var(--divider-color);
                 background: var(--card-background-color); color: var(--primary-text-color); font-family: inherit; }
+        input[type="date"] { -webkit-appearance: none; appearance: none; min-width: 0;
+                max-width: 100%; height: calc(1.25em + 22px); line-height: 1.25; text-align: left; }
+        input[type="date"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
+        input[type="date"]::-webkit-calendar-picker-indicator { opacity: .7; }
         label.check { display: flex; align-items: center; gap: 10px; color: var(--primary-text-color); font-size: 15px; }
         label.check input { width: 20px; height: 20px; margin: 0; flex: none; }
         .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
@@ -1453,6 +1637,23 @@ class BillsPanel extends HTMLElement {
         .day { border: 1px solid var(--divider-color); border-radius: 10px; padding: 8px 4px; }
         .dayamt { font-size: 17px; font-weight: 500; white-space: nowrap; }
         .breakdown { margin-top: 4px; }
+        .eyebtn { margin: 4px auto 0; }
+        .suggest { margin: -6px 0 12px; border: 1px solid var(--divider-color); border-radius: 10px;
+                   overflow: hidden; }
+        .suggestion { display: flex; width: 100%; justify-content: space-between; align-items: baseline;
+                      gap: 12px; padding: 10px 12px; background: transparent; border-radius: 0;
+                      color: var(--primary-text-color); text-align: left; font-size: 15px; }
+        .suggestion + .suggestion { border-top: 1px solid var(--divider-color); }
+        .suggestion:hover, .suggestion:focus-visible { background: rgba(127, 127, 127, .12); }
+        .daychips::-webkit-scrollbar { display: none; }
+        .daychips { position: relative; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+                    scrollbar-width: none; }
+        .daychips .chip { flex: 0 0 auto; min-width: 84px; }
+        .daynav { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; }
+        .daynav input { flex: 1; }
+        .daynav button:disabled { opacity: .3; }
+        .daytotal { text-align: center; margin: 12px 0 8px; }
+        .dayspent { font-size: 20px; font-weight: 500; }
         .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px;
                border: 1px solid var(--divider-color); border-radius: 10px; margin-bottom: 8px; }
         .segbtn { background: transparent; color: var(--primary-text-color); font-weight: 500; padding: 9px; }
@@ -1490,6 +1691,10 @@ class BillsPanel extends HTMLElement {
         ${body}
       </div>`;
     this._bind(k, b);
+    // Keep the picked day's chip in view (re-rendering resets the scroll).
+    const row = this.shadowRoot.querySelector(".daychips");
+    const chip = row && row.querySelector(".chip.sel");
+    if (chip) row.scrollLeft = chip.offsetLeft - (row.clientWidth - chip.offsetWidth) / 2;
   }
 
   _bind(kind, item) {
@@ -1502,6 +1707,17 @@ class BillsPanel extends HTMLElement {
     on("addtx", () => this._open("tx", null, { type: "expense" }));
     on("budget-settings", () => this._open("budgetsetup"));
     on("toggle-tx", () => { this._showAllTx = !this._showAllTx; this._render(); });
+    on("toggle-breakdown", () => {
+      this._showBreakdown = !this._showBreakdown;
+      try { localStorage.setItem("bills-panel-breakdown", this._showBreakdown ? "1" : "0"); } catch (e) { /* private mode */ }
+      this._render();
+    });
+    each("txday", (d) => this._showTxDay(d));
+    on("txday-prev", () => this._showTxDay(addDays(this._txDay, -1)));
+    on("txday-next", () => this._showTxDay(addDays(this._txDay, 1)));
+    on("txday-hide", () => { this._txOpen = false; this._confirmTx = null; this._render(); });
+    const dayInput = root.getElementById("txday");
+    if (dayInput) dayInput.addEventListener("change", () => this._showTxDay(dayInput.value));
     each("newstream", (t) => this._open("stream", null, { type: t }));
     each("editstream", (id) => this._open("stream", id));
     each("savemove", (d) => this._open("savemove", null, { dir: d }));

@@ -390,4 +390,15 @@ budget_summary:
   name: Budget summary
   description: >-
     Today's budget, the next two days, today's allowance, savings totals,
-    recurring income and savings plans, and recent transactions.
+    recurring income and savings plans, today's transactions and how much
+    was spent and earned on each earlier day.
+
+list_transactions:
+  name: List a day's transactions
+  description: >-
+    Expenses, income, savings moves and bill payments that touched the budget
+    on one day, with how much was spent and earned.
+  fields:
+    date:
+      required: true
+      selector: {date: }

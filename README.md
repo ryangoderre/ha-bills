@@ -109,18 +109,32 @@ today − expenses today. It updates as soon as you add something. Spend less
 and the rest carries to tomorrow; spend more and tomorrow starts lower. The top
 of the tab shows today and the next two days, each with what it adds. If the
 daily amount changes in the next two days (a savings plan or paycheck starting,
-or a bill ending), a line under the breakdown says so, e.g. *From tomorrow:
-$70.48 a day — Vacation (savings plan) starts*.
+or a bill ending), a line under them says so, e.g. *From tomorrow:
+$70.48 a day — Vacation (savings plan) starts*. Tap the eye to see what each
+day is made of (income − bills − savings, and any bills left out because they
+have no amount); the crossed-out eye hides it again.
+
+**Today's transactions** lists today's spending, income and savings moves (the
+latest 3, with *Show more* for the rest). **Previous days' transactions** shows
+what you spent on each of the last 30 days as a row of days you can scroll
+sideways. Tap a day to see its total and transactions; from there, tap another
+day, step with the arrows, or use the date picker for anything older. *Hide*
+folds it back to the row of days.
+Bill payments that changed the budget (a one-time bill, or paying more or less
+than the estimate) are listed too.
 
 At midnight each finished day is locked in, so changing a paycheck, a savings
 plan or a bill's estimate only changes today onward, never the past. (A
 **Budget reset** starts over from its new start date, so days from then on are
 worked out again with the current amounts.)
 
-**Adding things** (**+ Add**):
+**Adding things** (**+ Add**). Amounts fill in like a cash register: type
+`1200` for $12.00 or `5` for $0.05, no decimal point needed.
 
 - **Expense**: amount, category, optional note (it uses the category name if
-  you leave it empty), date.
+  you leave it empty), date. As you type a note, notes you've used before are
+  offered (type `Ch` for *Chipotle*); picking one also fills in the category
+  you used with it last time if you haven't chosen one.
 - **Income**: *One-off* adds it to that day's budget (e.g. card rewards).
   *Every week / Every 2 weeks / Monthly / Yearly* adds recurring income with a
   start date and an optional end date (leave it empty if it's open-ended and
@@ -210,7 +224,8 @@ Ones marked *returns* give back data (use *Developer tools → Actions* with
 | `move_to_savings`, `take_from_savings` | One-off savings moves. |
 | `delete_transaction` | Remove an expense, income or savings move. |
 | `add_recurring`, `update_recurring`, `delete_recurring` | Recurring income (`type: income`) or savings plans (`type: savings`). Every 2 weeks is `frequency: weekly`, `interval: 2`. |
-| `budget_summary` | *Returns* today's budget, the next days, the allowance, savings, recurring items and recent transactions. |
+| `budget_summary` | *Returns* today's budget, the next days, the allowance, savings, recurring items, today's transactions, what was spent each earlier day and earlier notes. |
+| `list_transactions` | *Returns* one day's transactions (`date`), with how much was spent and earned. |
 | `backup`, `list_backups`, `restore_backup` | See below. |
 
 Bills can be referred to by id or by name; categories by id or name too.
